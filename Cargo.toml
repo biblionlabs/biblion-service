@@ -1,0 +1,30 @@
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Bible self-host service "
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/common",
+    "crates/db",
+    "services/provider",
+    "services/setup",
+    "services/translate",
+]
+
+[workspace.dependencies]
+serde = "1"
+serde_json = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "tracing"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "http2", "rustls-tls", "system-proxy"] }
+# axum = { version = "0.8.3", default-features = false, features = [
+#     "json",
+#     "tracing",
+#     "http1",
+#     "http2",
+#     "tokio",
+#     "matched-path",
+# ] }
