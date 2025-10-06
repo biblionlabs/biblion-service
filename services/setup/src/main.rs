@@ -6,8 +6,15 @@ use indicatif::{ProgressBar, ProgressStyle};
 use inquire::list_option::ListOption;
 use inquire::validator::Validation;
 use inquire::{Confirm, MultiSelect};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use reqwest::Client;
 use serde_json::Value;
+
+use models::BibleVariant;
+
+use self::models::Book;
+
+mod models;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -273,6 +280,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let db_path = "bible.db";
+    let current_handler = tokio::runtime::Handle::current();
+
+    for bible_id in &selected_bible_ids {
+        let bible_dir = format!(".cache/bibles/{bible_id}");
+        let bible_manifest_path = format!(".cache/bibles/{bible_id}/manifest.json");
+        fs::create_dir_all(&bible_dir)?;
+
+        println!("Start seupt of {bible_id}");
+
+        let bible_manifest: BibleVariant = match client
+            .get(&format!(
+                "https://v1.fetch.bible/bibles/{bible_id}/extra.json"
+            ))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let text = resp.text().await?;
+                fs::create_dir_all(format!("{bible_dir}/books"))?;
+                fs::write(&bible_manifest_path, &text)?;
+                serde_json::from_str(&text)?
+            }
+            _ => {
+                if Path::new(&bible_manifest_path).exists() {
+                    println!("  Using cached manifest.json");
+                    serde_json::from_str(&fs::read_to_string(&bible_manifest_path)?)?
+                } else {
+                    println!("  Failed to fetch and no cache found for {bible_id}");
+                    continue;
+                }
+            }
+        };
+
+        let books: Vec<String> = bible_manifest.book_names.keys().cloned().collect();
+
+        let pb = ProgressBar::new(books.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+
+        books.par_iter().for_each(|book| {
+            current_handler.block_on(async {
+                pb.set_message(format!("Downloading {book}.json"));
+                let book_url = format!("https://v1.fetch.bible/bibles/{bible_id}/txt/{book}.json");
+                let book_path = format!("{bible_dir}/books/{book}.json");
+
+                let data = if Path::new(&book_path).exists() {
+                    fs::read_to_string(&book_path).unwrap()
+                } else {
+                    match client.get(&book_url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            let text = resp.text().await.unwrap();
+                            fs::write(&book_path, &text).unwrap();
+                            text
+                        }
+                        _ => {
+                            pb.println(format!("  Skipped {book} (failed and no cache)"));
+                            return;
+                        }
+                    }
+                };
+
+                match serde_json::from_str::<Book>(&data) {
+                    Ok(parsed) => {
+                        let chapters = parsed.contents.len();
+                        pb.println(format!(
+                            "  Parsed {}: {chapters} chapters loaded.",
+                            parsed.name.long
+                        ));
+                    }
+                    Err(e) => {
+                        pb.println(format!("  Error parsing {book}: {e}"));
+                    }
+                }
+
+                pb.inc(1);
+            })
+        });
+
+        pb.finish_with_message("Bible fully cached");
+    }
 
     println!("\nSetup completed. Database created at: {db_path}");
     println!("Saved selection to .cache/selection.json");
