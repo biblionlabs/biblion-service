@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, SystemTime};
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -296,8 +297,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cross_bible_dir = format!(".cache/cross");
     fs::create_dir_all(&cross_bible_dir)?;
 
-    let cross_pb = ProgressBar::new(original_books.len() as u64);
-    cross_pb.set_style(
+    let pb = ProgressBar::new(original_books.len() as u64);
+    pb.set_style(
         ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}",
         )
@@ -325,67 +326,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         text
                     }
                     _ => {
-                        cross_pb.println(format!("  Skipped {book_id} (failed and no cache)"));
+                        pb.println(format!("  Skipped {book_id} (failed and no cache)"));
                         return;
                     }
                 }
             };
 
             if let Err(e) = serde_json::from_str::<CrossReference>(&data) {
-                cross_pb.println(format!("  Error parsing {book_id}: {e}"));
+                pb.println(format!("  Error parsing {book_id}: {e}"));
             }
 
-            cross_pb.inc(1);
+            pb.inc(1);
         });
     });
-    cross_pb.finish_with_message("Validate and cached Cross References");
+    pb.finish_with_message("Validate and cached Cross References");
+    pb.reset();
 
     println!("Start setup Bible Sources");
 
-    for bible_id in &selected_bible_ids {
-        let bible_dir = format!(".cache/bibles/{bible_id}");
-        let bible_manifest_path = format!(".cache/bibles/{bible_id}/manifest.json");
-        fs::create_dir_all(&bible_dir)?;
+    let c = AtomicU64::default();
+    let selected_bible_ids = selected_bible_ids
+        .par_iter()
+        .flat_map(|bible_id| {
+            current_handler.block_on(async {
+                let bible_dir = format!(".cache/bibles/{bible_id}");
+                let bible_manifest_path = format!(".cache/bibles/{bible_id}/manifest.json");
+                fs::create_dir_all(&bible_dir).ok()?;
 
-        println!("Start setup of {bible_id}");
+                println!("Start setup of {bible_id}");
 
-        let bible_manifest: BibleVariant = match client
-            .get(&format!(
-                "https://v1.fetch.bible/bibles/{bible_id}/extra.json"
-            ))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                let text = resp.text().await?;
-                fs::create_dir_all(format!("{bible_dir}/books"))?;
-                fs::write(&bible_manifest_path, &text)?;
-                serde_json::from_str(&text)?
-            }
-            _ => {
-                if Path::new(&bible_manifest_path).exists() {
-                    println!("  Using cached manifest.json");
-                    serde_json::from_str(&fs::read_to_string(&bible_manifest_path)?)?
-                } else {
-                    println!("  Failed to fetch and no cache found for {bible_id}");
-                    continue;
-                }
-            }
-        };
+                let bible_manifest: BibleVariant = match client
+                    .get(&format!(
+                        "https://v1.fetch.bible/bibles/{bible_id}/extra.json"
+                    ))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let text = resp.text().await.ok()?;
+                        fs::create_dir_all(format!("{bible_dir}/books")).ok()?;
+                        fs::write(&bible_manifest_path, &text).ok()?;
+                        serde_json::from_str(&text).ok()?
+                    }
+                    _ => {
+                        if Path::new(&bible_manifest_path).exists() {
+                            println!("  Using cached manifest.json");
+                            serde_json::from_str(&fs::read_to_string(&bible_manifest_path).ok()?)
+                                .ok()?
+                        } else {
+                            println!("  Failed to fetch and no cache found for {bible_id}");
+                            return None;
+                        }
+                    }
+                };
 
-        let books: Vec<String> = bible_manifest.book_names.keys().cloned().collect();
+                let books: Vec<String> = bible_manifest.book_names.keys().cloned().collect();
+                c.fetch_add(books.len() as u64, std::sync::atomic::Ordering::SeqCst);
 
-        let pb = ProgressBar::new(books.len() as u64);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}",
-            )
-            .unwrap()
-            .progress_chars("=> "),
-        );
+                Some((bible_id.clone(), books))
+            })
+        })
+        .collect::<Vec<(String, Vec<_>)>>();
 
+    selected_bible_ids.par_iter().for_each(|(bible_id, books)| {
         books.par_iter().for_each(|book| {
             current_handler.block_on(async {
+                let bible_dir = format!(".cache/bibles/{bible_id}");
                 pb.set_message(format!("Downloading {book}.json"));
                 let book_url = format!("https://v1.fetch.bible/bibles/{bible_id}/txt/{book}.json");
                 let book_path = format!("{bible_dir}/books/{book}.json");
@@ -422,9 +428,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pb.inc(1);
             })
         });
-
-        pb.finish_with_message("Bible fully cached");
-    }
+    });
+    pb.finish_with_message("Bible fully cached");
 
     println!("\nSetup completed. Database created at: {db_path}");
     println!("Saved selection to .cache/selection.json");
