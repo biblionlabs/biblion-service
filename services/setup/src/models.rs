@@ -2,6 +2,15 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+pub type CrossReference = HashMap<String, HashMap<String, Vec<Vec<Reference>>>>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Reference {
+    Integer(i32),
+    String(String),
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BibleVariant {
     pub book_names: HashMap<String, Name>,

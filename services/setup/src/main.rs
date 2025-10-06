@@ -10,11 +10,9 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use reqwest::Client;
 use serde_json::Value;
 
-use models::BibleVariant;
-
-use self::models::Book;
-
 mod models;
+
+use models::{BibleVariant, Book, CrossReference};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,6 +65,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::from_slice(&content)?
     };
 
+    let original_books = manifest
+        .get("book_names_english")
+        .ok_or("manifest missing book names")?
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<String>>();
     let languages_obj = manifest
         .get("languages")
         .and_then(|v| v.as_object())
@@ -173,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|opt| language_entries[opt.index].0.clone())
         .collect();
 
-    let selected_bible_ids: Vec<String> = selected_bible_options
+    let mut selected_bible_ids: Vec<String> = selected_bible_options
         .iter()
         .map(|opt| bible_entries[opt.index].0.clone())
         .collect();
@@ -198,16 +204,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        for id in &selected_bible_ids {
-            if let Some(bv) = bibles_obj.get(id) {
-                if let Some(orig) = bv.get("original_language").and_then(|v| v.as_str()) {
-                    if !selected_lang_codes.contains(&orig.to_string()) {
-                        selected_lang_codes.push(orig.to_string());
-                        originals_added.push(orig.to_string());
-                    }
-                }
-            }
-        }
+        selected_bible_ids.extend_from_slice(&[
+            // Griego de la Septuaginta (LXX - AT)
+            "grc_bre".into(), // Brenton's Septuagint Text (1870)
+            // Griego del Nuevo Testamento
+            "grc_sr".into(),  // Statistical Restoration Greek New Testament (2024)
+            "grc_sbl".into(), // SBL Greek New Testament (2010)
+            //
+            // COMPLEMENTARIAS - Para análisis textual
+            "grc_tr".into(), // Textus Receptus (1881)
+            "grc_rp".into(), // Byzantine Textform (Robinson-Pierpont)
+            //
+            // VERSIONES ANTIGUAS IMPORTANTES
+            "cop_shc".into(), // Coptic Sahidic New Testament (siglos II-IV)
+        ]);
     }
 
     selected_lang_codes.sort();
@@ -282,12 +292,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = "bible.db";
     let current_handler = tokio::runtime::Handle::current();
 
+    println!("Start setup Cross References");
+    let cross_bible_dir = format!(".cache/cross");
+    fs::create_dir_all(&cross_bible_dir)?;
+
+    let cross_pb = ProgressBar::new(original_books.len() as u64);
+    cross_pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}",
+        )
+        .unwrap()
+        .progress_chars("=> "),
+    );
+
+    original_books.par_iter().for_each(|book_id| {
+        current_handler.block_on(async {
+            let cross_path = format!("{cross_bible_dir}/{book_id}.json");
+
+            let data = if Path::new(&cross_path).exists() {
+                fs::read_to_string(&cross_path).unwrap()
+            } else {
+                match client
+                    .get(format!(
+                        "https://v1.fetch.bible/crossref/large/{book_id}.json"
+                    ))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let text = resp.text().await.unwrap();
+                        fs::write(&cross_path, &text).unwrap();
+                        text
+                    }
+                    _ => {
+                        cross_pb.println(format!("  Skipped {book_id} (failed and no cache)"));
+                        return;
+                    }
+                }
+            };
+
+            if let Err(e) = serde_json::from_str::<CrossReference>(&data) {
+                cross_pb.println(format!("  Error parsing {book_id}: {e}"));
+            }
+
+            cross_pb.inc(1);
+        });
+    });
+    cross_pb.finish_with_message("Validate and cached Cross References");
+
+    println!("Start setup Bible Sources");
+
     for bible_id in &selected_bible_ids {
         let bible_dir = format!(".cache/bibles/{bible_id}");
         let bible_manifest_path = format!(".cache/bibles/{bible_id}/manifest.json");
         fs::create_dir_all(&bible_dir)?;
 
-        println!("Start seupt of {bible_id}");
+        println!("Start setup of {bible_id}");
 
         let bible_manifest: BibleVariant = match client
             .get(&format!(
