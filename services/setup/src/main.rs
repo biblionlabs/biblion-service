@@ -387,6 +387,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .collect::<Vec<(String, Vec<_>)>>();
+    
+    pb.set_length(c.load(std::sync::atomic::Ordering::Relaxed));
 
     selected_bible_ids.par_iter().for_each(|(bible_id, books)| {
         books.par_iter().for_each(|book| {
