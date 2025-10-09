@@ -58,7 +58,7 @@ pub enum Content {
         contents: String,
         level: u8,
     },
-    Content(String),
+    Raw(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

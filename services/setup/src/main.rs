@@ -191,18 +191,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (code, eng, loc) in &language_entries {
             let low_eng = eng.to_lowercase();
             let low_loc = loc.to_lowercase();
-            if code == "grc"
+            if (code == "grc"
                 || code == "hbo"
                 || code == "heb"
                 || low_eng.contains("greek")
                 || low_eng.contains("hebrew")
                 || low_loc.contains("greek")
-                || low_loc.contains("hebrew")
+                || low_loc.contains("hebrew"))
+                && !selected_lang_codes.contains(code)
             {
-                if !selected_lang_codes.contains(code) {
-                    selected_lang_codes.push(code.clone());
-                    originals_added.push(code.clone());
-                }
+                selected_lang_codes.push(code.clone());
+                originals_added.push(code.clone());
             }
         }
         selected_bible_ids.extend_from_slice(&[
@@ -294,8 +293,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_handler = tokio::runtime::Handle::current();
 
     println!("Start setup Cross References");
-    let cross_bible_dir = format!(".cache/cross");
-    fs::create_dir_all(&cross_bible_dir)?;
+    let cross_bible_dir = ".cache/cross";
+    fs::create_dir_all(cross_bible_dir)?;
 
     let pb = ProgressBar::new(original_books.len() as u64);
     pb.set_style(
@@ -356,7 +355,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Start setup of {bible_id}");
 
                 let bible_manifest: BibleVariant = match client
-                    .get(&format!(
+                    .get(format!(
                         "https://v1.fetch.bible/bibles/{bible_id}/extra.json"
                     ))
                     .send()
@@ -387,7 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .collect::<Vec<(String, Vec<_>)>>();
-    
+
     pb.set_length(c.load(std::sync::atomic::Ordering::Relaxed));
 
     selected_bible_ids.par_iter().for_each(|(bible_id, books)| {
