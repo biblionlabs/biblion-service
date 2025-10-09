@@ -20,6 +20,8 @@ pub struct BibleVersion {
 pub struct Book {
     pub id: String,
     pub name: String,
+    pub name_long: String,
+    pub abbrev: String,
     pub order: i32,
     pub testament: String,
 }
@@ -31,12 +33,11 @@ pub struct Verse {
     pub chapter: i32,
     pub verse: i32,
     pub text: String,
-    pub bible_version_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossReference {
     pub id: Option<i64>,
-    pub from_verse_id: i64,
-    pub to_verse_id: i64,
+    pub from_verse_id: i32,
+    pub to_verse_id: i32,
 }

@@ -1,26 +1,158 @@
+#![allow(async_fn_in_trait)]
+
 use std::sync::Arc;
 
-use limbo::{Connection, Result};
+use limbo::params::IntoParams;
+use limbo::{Connection, IntoValue, Result, Row, Value};
 
-mod models;
+mod bible;
+mod book;
+mod cross;
+mod lang;
+mod verse;
 
-use models::*;
+pub use bible::*;
+pub use book::*;
+pub use cross::*;
+pub use lang::*;
+pub use verse::*;
+
+pub trait Queriable {
+    const TABLE: &str;
+    const FIELDS: &[&str];
+
+    fn field_list() -> String {
+        Self::FIELDS.join(", ")
+    }
+}
+
+pub trait Migrate {
+    async fn migrate(&self) -> Result<()>;
+}
+
+pub trait FromRow: Sized {
+    fn from_row(row: &Row) -> Result<Self>;
+}
+
+pub trait Crud: Queriable + FromRow + Send + Sync + Sized {
+    async fn insert(&self, conn: &Connection) -> Result<()> {
+        let fields = Self::FIELDS.join(", ");
+        let placeholders = (1..=Self::FIELDS.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "INSERT OR REPLACE INTO {} ({fields}) VALUES ({placeholders})",
+            Self::TABLE
+        );
+
+        conn.execute(&sql, self.to_params()).await?;
+        Ok(())
+    }
+
+    async fn update(
+        &self,
+        conn: &Connection,
+        key_field: &str,
+        key_value: impl IntoValue,
+    ) -> Result<()> {
+        let assignments = Self::FIELDS
+            .iter()
+            .map(|f| format!("{f} = ?"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "UPDATE {} SET {} WHERE {} = ?",
+            Self::TABLE,
+            assignments,
+            key_field
+        );
+
+        let mut params = self.to_params();
+        params.push(key_value.into_value()?);
+        conn.execute(&sql, params).await?;
+        Ok(())
+    }
+
+    async fn delete(conn: &Connection, key_field: &str, key_value: impl IntoParams) -> Result<()> {
+        let sql = format!("DELETE FROM {} WHERE {} = ?", Self::TABLE, key_field);
+        conn.execute(&sql, key_value).await?;
+        Ok(())
+    }
+
+    async fn select_all(conn: &Connection) -> Result<Vec<Self>> {
+        let sql = format!("SELECT {} FROM {}", Self::field_list(), Self::TABLE);
+        let mut rows = conn.query(&sql, ()).await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push(Self::from_row(&r)?);
+        }
+        Ok(out)
+    }
+
+    async fn select_where(
+        conn: &Connection,
+        field: &str,
+        value: impl IntoParams,
+    ) -> Result<Vec<Self>> {
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {} = ?",
+            Self::field_list(),
+            Self::TABLE,
+            field
+        );
+
+        let mut rows = conn.query(&sql, value).await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push(Self::from_row(&r)?);
+        }
+        Ok(out)
+    }
+
+    fn to_params(&self) -> Vec<Value>;
+}
+
+pub trait Joinable<A: Queriable + FromRow, B: Queriable + FromRow> {
+    async fn inner_join(
+        conn: &Connection,
+        left_field: &str,
+        right_field: &str,
+        where_clause: Option<&str>,
+    ) -> Result<Vec<(A, B)>> {
+        let sql = format!(
+            "SELECT a.{}, b.{} FROM {} AS a INNER JOIN {} AS b ON a.{} = b.{} {}",
+            A::field_list(),
+            B::field_list(),
+            A::TABLE,
+            B::TABLE,
+            left_field,
+            right_field,
+            where_clause
+                .map(|w| format!("WHERE {w}"))
+                .unwrap_or_default()
+        );
+
+        let mut rows = conn.query(&sql, ()).await?;
+        let mut out = Vec::new();
+
+        while let Some(r) = rows.next().await? {
+            let a = A::from_row(&r)?;
+            let b = B::from_row(&r)?;
+            out.push((a, b));
+        }
+
+        Ok(out)
+    }
+}
 
 pub struct Sqlite {
     conn: Arc<Connection>,
 }
 
-impl Sqlite {
-    pub async fn new(db: &str) -> Result<Self> {
-        let conn = limbo::Builder::new_local(db).build().await?;
-        let conn = Arc::new(conn.connect()?);
-        let db = Self { conn };
-
-        db.migrate().await?;
-
-        Ok(db)
-    }
-
+impl Migrate for Sqlite {
     async fn migrate(&self) -> Result<()> {
         let schema = r#"
         CREATE TABLE IF NOT EXISTS languages (
@@ -47,19 +179,13 @@ impl Sqlite {
             FOREIGN KEY(bible_id) REFERENCES bibles(id)
         );
 
-        CREATE TABLE IF NOT EXISTS chapters (
+        CREATE TABLE IF NOT EXISTS verses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_id TEXT NOT NULL,
             chapter_number INTEGER NOT NULL,
-            FOREIGN KEY(book_id) REFERENCES books(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS verses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chapter_id INTEGER NOT NULL,
             verse_number INTEGER NOT NULL,
             text TEXT NOT NULL,
-            FOREIGN KEY(chapter_id) REFERENCES chapters(id)
+            FOREIGN KEY(book_id) REFERENCES books(id)
         );
 
         CREATE TABLE IF NOT EXISTS cross_references (
@@ -79,203 +205,16 @@ impl Sqlite {
         self.conn.execute(schema, ()).await?;
         Ok(())
     }
+}
 
-    // --- Language management ---
-    pub async fn insert_language(&self, lang: &Language) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO languages (id, name_local, name_english) VALUES (?1, ?2, ?3)",
-            (lang.id.as_str(), lang.name_local.as_str(), lang.name_english.as_str()),
-        ).await?;
-        Ok(())
-    }
+impl Sqlite {
+    pub async fn new(db: &str) -> Result<Self> {
+        let conn = limbo::Builder::new_local(db).build().await?;
+        let conn = Arc::new(conn.connect()?);
+        let db = Self { conn };
 
-    pub async fn get_language(&self, id: &str) -> Result<Option<Language>> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT id, name_local, name_english FROM languages WHERE id = ?1",
-                [id],
-            )
-            .await?;
-        Ok(rows.next().await?.and_then(|r| {
-            Some(Language {
-                id: r.get_value(0).ok()?.as_text()?.clone(),
-                name_local: r.get_value(1).ok()?.as_text()?.clone(),
-                name_english: r.get_value(2).ok()?.as_text()?.clone(),
-            })
-        }))
-    }
+        db.migrate().await?;
 
-    // --- Bible management ---
-    pub async fn insert_bible(&self, bible: &Bible) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO bibles (id, name_local, name_english, language_id) VALUES (?1, ?2, ?3, ?4)",
-                (bible.id.as_str(), bible.name_local.as_str(), bible.name_english.as_str(), bible.language_id.as_str()),
-        ).await?;
-        Ok(())
-    }
-
-    pub async fn get_bible(&self, id: &str) -> Result<Option<Bible>> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT id, name_local, name_english, language_id FROM bibles WHERE id = ?1",
-                [id],
-            )
-            .await?;
-        Ok(rows.next().await?.and_then(|r| {
-            Some(Bible {
-                id: r.get_value(0).ok()?.as_text()?.clone(),
-                name_local: r.get_value(1).ok()?.as_text()?.clone(),
-                name_english: r.get_value(2).ok()?.as_text()?.clone(),
-                language_id: r.get_value(3).ok()?.as_text()?.clone(),
-            })
-        }))
-    }
-
-    // --- Books ---
-    pub async fn insert_book(&self, book: &Book) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO books (id, bible_id, name_normal, name_long, name_abbrev, order_index)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                (book.id.as_str(),
-                book.bible_id.as_str(),
-                book.name_normal.as_str(),
-                book.name_long.as_str(),
-                book.name_abbrev.as_str(),
-                book.order_index),
-        ).await?;
-        Ok(())
-    }
-
-    pub async fn list_books(&self, bible_id: &str) -> Result<Vec<Book>> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT id, bible_id, name_normal, name_long, name_abbrev, order_index FROM books WHERE bible_id = ?1 ORDER BY order_index ASC",
-                [bible_id],
-            )
-            .await?;
-
-        let mut out = Vec::new();
-        while let Some(r) = rows.next().await? {
-            out.push(Book {
-                id: r.get_value(0)?.as_text().unwrap().clone(), // id
-                bible_id: r.get_value(1)?.as_text().unwrap().clone(), // bible_id
-                name_normal: r.get_value(2)?.as_text().unwrap().clone(), // name_normal
-                name_long: r.get_value(3)?.as_text().unwrap().clone(), // name_long
-                name_abbrev: r.get_value(4)?.as_text().unwrap().clone(), // name_abbrev
-                order_index: *r.get_value(5)?.as_integer().unwrap() as i32, // order_index
-            });
-        }
-        Ok(out)
-    }
-
-    // --- Chapters ---
-    pub async fn insert_chapter(&self, ch: &Chapter) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO chapters (book_id, chapter_number) VALUES (?1, ?2)",
-                (ch.book_id.as_str(), ch.chapter_number),
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_chapters(&self, book_id: &str) -> Result<Vec<Chapter>> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT id, book_id, chapter_number FROM chapters WHERE book_id = ?1 ORDER BY chapter_number ASC",
-                [book_id],
-            )
-            .await?;
-        let mut out = Vec::new();
-        while let Some(r) = rows.next().await? {
-            out.push(Chapter {
-                id: *r.get_value(0)?.as_integer().unwrap(),          // id
-                book_id: r.get_value(1)?.as_text().unwrap().clone(), // book_id
-                chapter_number: *r.get_value(2)?.as_integer().unwrap() as _, // chapter_number
-            });
-        }
-        Ok(out)
-    }
-
-    // --- Verses ---
-    pub async fn insert_verse(&self, v: &Verse) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO verses (chapter_id, verse_number, text) VALUES (?1, ?2, ?3)",
-                (v.chapter_id, v.verse_number, v.text.as_str()),
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_verses_by_chapter(&self, chapter_id: i64) -> Result<Vec<Verse>> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT id, chapter_id, verse_number FROM verses WHERE chapter_id = ?1 ORDER BY verse_number ASC",
-                [chapter_id],
-            )
-            .await?;
-        let mut out = Vec::new();
-        while let Some(r) = rows.next().await? {
-            out.push(Verse {
-                id: *r.get_value(0)?.as_integer().unwrap(),         // id
-                chapter_id: *r.get_value(1)?.as_integer().unwrap(), // chapter_id
-                verse_number: *r.get_value(2)?.as_integer().unwrap() as _, // verse_number
-                text: r.get_value(3)?.as_text().unwrap().clone(),   // text
-            });
-        }
-        Ok(out)
-    }
-
-    // --- Cross References ---
-    pub async fn insert_cross_reference(&self, cr: &CrossReference) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO cross_references (
-                source_book, source_chapter, source_verse,
-                target_book, target_chapter, target_verse
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                (
-                    cr.source_book.as_str(),
-                    cr.source_chapter,
-                    cr.source_verse,
-                    cr.target_book.as_str(),
-                    cr.target_chapter,
-                    cr.target_verse,
-                ),
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_cross_references(
-        &self,
-        book: &str,
-        chapter: i32,
-        verse: i32,
-    ) -> Result<Vec<CrossReference>> {
-        let mut rows = self.conn.query(
-            "SELECT id, source_book, source_chapter, source_verse, target_book, target_chapter, target_verse FROM cross_references WHERE source_book = ?1 AND source_chapter = ?2 AND source_verse = ?3",
-            (book, chapter, verse),
-        ).await?;
-
-        let mut out = Vec::new();
-        while let Some(r) = rows.next().await? {
-            out.push(CrossReference {
-                id: *r.get_value(0)?.as_integer().unwrap(), // id
-                source_book: r.get_value(1)?.as_text().unwrap().clone(), // source_book
-                source_chapter: *r.get_value(2)?.as_integer().unwrap() as _, // source_chapter
-                source_verse: *r.get_value(3)?.as_integer().unwrap() as _, // source_verse
-                target_book: r.get_value(4)?.as_text().unwrap().clone(), // target_book
-                target_chapter: *r.get_value(5)?.as_integer().unwrap() as _, // target_chapter
-                target_verse: *r.get_value(6)?.as_integer().unwrap() as _, // target_verse
-            });
-        }
-        Ok(out)
+        Ok(db)
     }
 }
