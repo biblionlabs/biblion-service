@@ -1,4 +1,4 @@
-use limbo::{Result, Row, Value};
+use rusqlite::{Result, Row};
 use serde::{Deserialize, Serialize};
 
 use crate::{Crud, FromRow, Queriable};
@@ -21,21 +21,21 @@ impl Queriable for DbBible {
 impl FromRow for DbBible {
     fn from_row(row: &Row) -> Result<Self> {
         Ok(Self {
-            id: row.get_value(0)?.as_text().unwrap().clone(),
-            name_local: row.get_value(1)?.as_text().unwrap().clone(),
-            name_english: row.get_value(2)?.as_text().unwrap().clone(),
-            language_id: row.get_value(3)?.as_text().unwrap().clone(),
+            id: row.get("id")?,
+            name_local: row.get("name_local")?,
+            name_english: row.get("name_english")?,
+            language_id: row.get("language_id")?,
         })
     }
 }
 
 impl Crud for DbBible {
-    fn to_params(&self) -> Vec<Value> {
+    fn params<'a>(&'a self) -> Vec<&'a dyn rusqlite::ToSql> {
         vec![
-            Value::from(self.id.as_str()),
-            Value::from(self.name_local.as_str()),
-            Value::from(self.name_english.as_str()),
-            Value::from(self.language_id.as_str()),
+            &self.id,
+            &self.name_local,
+            &self.name_english,
+            &self.language_id,
         ]
     }
 }

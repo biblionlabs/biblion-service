@@ -1,21 +1,24 @@
-#![allow(async_fn_in_trait)]
+use std::sync::{Arc, Mutex};
 
-use std::sync::Arc;
-
-use limbo::params::IntoParams;
-use limbo::{Connection, IntoValue, Result, Row, Value};
+use rusqlite::{Connection as SQLiteConnection, Params, Result, Row, ToSql, params_from_iter};
 
 mod bible;
 mod book;
 mod cross;
+mod header;
 mod lang;
+mod notes;
 mod verse;
 
 pub use bible::*;
 pub use book::*;
 pub use cross::*;
+pub use header::*;
 pub use lang::*;
+pub use notes::*;
 pub use verse::*;
+
+pub type Connection = Arc<Mutex<SQLiteConnection>>;
 
 pub trait Queriable {
     const TABLE: &str;
@@ -27,36 +30,69 @@ pub trait Queriable {
 }
 
 pub trait Migrate {
-    async fn migrate(&self) -> Result<()>;
+    fn migrate(&self) -> Result<()>;
 }
 
 pub trait FromRow: Sized {
     fn from_row(row: &Row) -> Result<Self>;
 }
 
+pub trait ToParams {
+    fn as_params<'a>(&'a self) -> Vec<&'a dyn ToSql>;
+}
+
 pub trait Crud: Queriable + FromRow + Send + Sync + Sized {
-    async fn insert(&self, conn: &Connection) -> Result<()> {
+    fn insert(&self, conn: Connection) -> Result<()> {
+        let fields = Self::FIELDS.join(", ").replacen("id, ", "", 1);
+        let placeholders = (1..=Self::FIELDS.len() - 1)
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // Waiting for limbo support OR REPLACE || OR IGNORE
+        // "INSERT OR REPLACE INTO {} ({fields}) VALUES ({placeholders})",
+        let sql = format!(
+            "INSERT INTO {} ({fields}) VALUES ({placeholders})",
+            Self::TABLE
+        );
+
+        let res = conn
+            .lock()
+            .unwrap()
+            .execute(&sql, params_from_iter(self.insert_params()));
+        if let Err(e) = res {
+            println!("SQL: {sql}");
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn insert_with_id(&self, conn: Connection) -> Result<()> {
         let fields = Self::FIELDS.join(", ");
         let placeholders = (1..=Self::FIELDS.len())
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
             .join(", ");
 
+        // Waiting for limbo support OR REPLACE || OR IGNORE
+        // "INSERT OR REPLACE INTO {} ({fields}) VALUES ({placeholders})",
         let sql = format!(
-            "INSERT OR REPLACE INTO {} ({fields}) VALUES ({placeholders})",
+            "INSERT INTO {} ({fields}) VALUES ({placeholders})",
             Self::TABLE
         );
 
-        conn.execute(&sql, self.to_params()).await?;
+        let res = conn
+            .lock()
+            .unwrap()
+            .execute(&sql, params_from_iter(self.params()));
+        if let Err(e) = res {
+            println!("SQL: {sql}");
+            return Err(e);
+        }
         Ok(())
     }
 
-    async fn update(
-        &self,
-        conn: &Connection,
-        key_field: &str,
-        key_value: impl IntoValue,
-    ) -> Result<()> {
+    fn update(&self, conn: Connection, key_field: &str, key_value: impl ToSql) -> Result<()> {
         let assignments = Self::FIELDS
             .iter()
             .map(|f| format!("{f} = ?"))
@@ -70,32 +106,32 @@ pub trait Crud: Queriable + FromRow + Send + Sync + Sized {
             key_field
         );
 
-        let mut params = self.to_params();
-        params.push(key_value.into_value()?);
-        conn.execute(&sql, params).await?;
+        let mut params = self.params();
+        let binding = key_value.to_sql()?;
+        params.push(&binding);
+        conn.lock()
+            .unwrap()
+            .execute(&sql, params_from_iter(params))?;
         Ok(())
     }
 
-    async fn delete(conn: &Connection, key_field: &str, key_value: impl IntoParams) -> Result<()> {
+    fn delete(conn: Connection, key_field: &str, key_value: impl Params) -> Result<()> {
         let sql = format!("DELETE FROM {} WHERE {} = ?", Self::TABLE, key_field);
-        conn.execute(&sql, key_value).await?;
+        conn.lock().unwrap().execute(&sql, key_value)?;
         Ok(())
     }
 
-    async fn select_all(conn: &Connection) -> Result<Vec<Self>> {
+    fn select_all(conn: Connection) -> Result<Vec<Self>> {
         let sql = format!("SELECT {} FROM {}", Self::field_list(), Self::TABLE);
-        let mut rows = conn.query(&sql, ()).await?;
-        let mut out = Vec::new();
-        while let Some(r) = rows.next().await? {
-            out.push(Self::from_row(&r)?);
-        }
-        Ok(out)
+        let binding = { conn.lock().unwrap() };
+        let mut stmt = binding.prepare(&sql)?;
+        Ok(stmt.query_map([], Self::from_row)?.collect::<Result<_>>()?)
     }
 
-    async fn select_where(
-        conn: &Connection,
+    fn select_where<'a>(
+        conn: Connection,
         field: &str,
-        value: impl IntoParams,
+        value: Vec<&'a dyn ToSql>,
     ) -> Result<Vec<Self>> {
         let sql = format!(
             "SELECT {} FROM {} WHERE {} = ?",
@@ -104,25 +140,28 @@ pub trait Crud: Queriable + FromRow + Send + Sync + Sized {
             field
         );
 
-        let mut rows = conn.query(&sql, value).await?;
-        let mut out = Vec::new();
-        while let Some(r) = rows.next().await? {
-            out.push(Self::from_row(&r)?);
-        }
-        Ok(out)
+        let binding = { conn.lock().unwrap() };
+        let mut stmt = binding.prepare(&sql)?;
+        Ok(stmt
+            .query_map(params_from_iter(value), Self::from_row)?
+            .collect::<Result<_>>()?)
     }
 
-    fn to_params(&self) -> Vec<Value>;
+    fn insert_params<'a>(&'a self) -> Vec<&'a dyn ToSql> {
+        self.params().into_iter().skip(1).collect()
+    }
+
+    fn params<'a>(&'a self) -> Vec<&'a dyn ToSql>;
 }
 
 pub trait Joinable<A: Queriable + FromRow, B: Queriable + FromRow> {
-    async fn inner_join(
-        conn: &Connection,
+    fn inner_join(
+        _conn: &Connection,
         left_field: &str,
         right_field: &str,
         where_clause: Option<&str>,
     ) -> Result<Vec<(A, B)>> {
-        let sql = format!(
+        let _sql = format!(
             "SELECT a.{}, b.{} FROM {} AS a INNER JOIN {} AS b ON a.{} = b.{} {}",
             A::field_list(),
             B::field_list(),
@@ -135,86 +174,104 @@ pub trait Joinable<A: Queriable + FromRow, B: Queriable + FromRow> {
                 .unwrap_or_default()
         );
 
-        let mut rows = conn.query(&sql, ()).await?;
-        let mut out = Vec::new();
+        // let mut stmt = conn.prepare_cached(&sql, ())?;
+        let out = Vec::new();
 
-        while let Some(r) = rows.next().await? {
-            let a = A::from_row(&r)?;
-            let b = B::from_row(&r)?;
-            out.push((a, b));
-        }
+        // while let Some(r) = rows.next().await? {
+        //     let a = A::from_row(&r)?;
+        //     let b = B::from_row(&r)?;
+        //     out.push((a, b));
+        // }
 
         Ok(out)
     }
 }
 
 pub struct Sqlite {
-    conn: Arc<Connection>,
+    conn: Connection,
 }
 
 impl Migrate for Sqlite {
-    async fn migrate(&self) -> Result<()> {
-        let schema = r#"
-        CREATE TABLE IF NOT EXISTS languages (
-            id TEXT PRIMARY KEY,
-            name_local TEXT NOT NULL,
-            name_english TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS bibles (
-            id TEXT PRIMARY KEY,
-            name_local TEXT NOT NULL,
-            name_english TEXT NOT NULL,
-            language_id TEXT NOT NULL,
-            FOREIGN KEY(language_id) REFERENCES languages(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS books (
-            id TEXT PRIMARY KEY,
-            bible_id TEXT NOT NULL,
-            name_normal TEXT NOT NULL,
-            name_long TEXT,
-            name_abbrev TEXT,
-            order_index INTEGER,
-            FOREIGN KEY(bible_id) REFERENCES bibles(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS verses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            book_id TEXT NOT NULL,
-            chapter_number INTEGER NOT NULL,
-            verse_number INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            FOREIGN KEY(book_id) REFERENCES books(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS cross_references (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_book TEXT NOT NULL,
-            source_chapter INTEGER NOT NULL,
-            source_verse INTEGER NOT NULL,
-            target_book TEXT NOT NULL,
-            target_chapter INTEGER NOT NULL,
-            target_verse INTEGER NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_verses_chapter ON verses(chapter_id);
-        CREATE INDEX IF NOT EXISTS idx_books_bible ON books(bible_id);
-        "#;
-
-        self.conn.execute(schema, ()).await?;
-        Ok(())
+    fn migrate(&self) -> Result<()> {
+        let sql = r#"BEGIN;
+CREATE TABLE IF NOT EXISTS languages (
+    id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    name_local TEXT NOT NULL,
+    name_english TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_languages_id ON languages(id);
+CREATE INDEX IF NOT EXISTS idx_languages_local ON languages(name_local);
+CREATE TABLE IF NOT EXISTS bibles (
+    id TEXT NOT NULL,
+    name_local TEXT NOT NULL,
+    name_english TEXT NOT NULL,
+    language_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bibles_id ON bibles(id);
+CREATE INDEX IF NOT EXISTS idx_bibles_language ON bibles(language_id);
+CREATE TABLE IF NOT EXISTS books (
+    id TEXT NOT NULL,
+    bible_id TEXT NOT NULL,
+    name_normal TEXT NOT NULL,
+    name_long TEXT,
+    name_abbrev TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_books_id ON books(id);
+CREATE INDEX IF NOT EXISTS idx_books_bible ON books(bible_id);
+CREATE TABLE IF NOT EXISTS verses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id TEXT NOT NULL,
+    chapter_number INTEGER NOT NULL,
+    verse_number INTEGER NOT NULL,
+    text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_verses_book_chapter ON verses(book_id, chapter_number, verse_number);
+CREATE TABLE IF NOT EXISTS verse_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id TEXT NOT NULL,
+    chapter_number INTEGER NOT NULL,
+    verse_number INTEGER NOT NULL,
+    text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_verse_notes_book_chapter ON verse_notes(book_id, chapter_number, verse_number);
+CREATE TABLE IF NOT EXISTS headers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bible_id TEXT NOT NULL,
+    book_id TEXT NOT NULL,
+    chapter_number INTEGER NOT NULL,
+    text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_headers_bible_book ON headers(bible_id, book_id);
+CREATE TABLE IF NOT EXISTS cross_references (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_book TEXT NOT NULL,
+    source_chapter INTEGER NOT NULL,
+    source_verse INTEGER NOT NULL,
+    target_book TEXT NOT NULL,
+    target_chapter INTEGER NOT NULL,
+    target_verse INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cross_source ON cross_references(source_book, source_chapter, source_verse);
+CREATE INDEX IF NOT EXISTS idx_cross_target ON cross_references(target_book, target_chapter, target_verse);
+COMMIT;
+"#;
+        self.conn.lock().unwrap().execute_batch(&sql)
     }
 }
 
 impl Sqlite {
-    pub async fn new(db: &str) -> Result<Self> {
-        let conn = limbo::Builder::new_local(db).build().await?;
-        let conn = Arc::new(conn.connect()?);
+    pub fn new(db: &str) -> Result<Self> {
+        let conn = rusqlite::Connection::open(db)?;
+        let conn = Arc::new(Mutex::new(conn));
         let db = Self { conn };
 
-        db.migrate().await?;
+        db.migrate()?;
 
         Ok(db)
+    }
+
+    pub fn connection(&self) -> Connection {
+        self.conn.clone()
     }
 }

@@ -1,4 +1,4 @@
-use limbo::{Result, Row, Value};
+use rusqlite::{Result, Row};
 use serde::{Deserialize, Serialize};
 
 use crate::{Crud, FromRow, Queriable};
@@ -32,26 +32,27 @@ impl Queriable for DbCrossReference {
 impl FromRow for DbCrossReference {
     fn from_row(row: &Row) -> Result<Self> {
         Ok(Self {
-            id: *row.get_value(0)?.as_integer().unwrap_or(&0),
-            source_book: row.get_value(1)?.as_text().unwrap().clone(),
-            source_chapter: *row.get_value(2)?.as_integer().unwrap_or(&0) as _,
-            source_verse: *row.get_value(3)?.as_integer().unwrap_or(&0) as _,
-            target_book: row.get_value(4)?.as_text().unwrap().clone(),
-            target_chapter: *row.get_value(5)?.as_integer().unwrap_or(&0) as _,
-            target_verse: *row.get_value(6)?.as_integer().unwrap_or(&0) as _,
+            id: row.get("id")?,
+            source_book: row.get("source_book")?,
+            source_chapter: row.get("source_chapter")?,
+            source_verse: row.get("source_verse")?,
+            target_book: row.get("target_book")?,
+            target_chapter: row.get("target_chapter")?,
+            target_verse: row.get("target_verse")?,
         })
     }
 }
 
 impl Crud for DbCrossReference {
-    fn to_params(&self) -> Vec<Value> {
+    fn params<'a>(&'a self) -> Vec<&'a dyn rusqlite::ToSql> {
         vec![
-            Value::from(self.source_book.as_str()),
-            Value::from(self.source_chapter),
-            Value::from(self.source_verse),
-            Value::from(self.target_book.as_str()),
-            Value::from(self.target_chapter),
-            Value::from(self.target_verse),
+            &self.id,
+            &self.source_book,
+            &self.source_chapter,
+            &self.source_verse,
+            &self.target_book,
+            &self.target_chapter,
+            &self.target_verse,
         ]
     }
 }
@@ -59,7 +60,7 @@ impl Crud for DbCrossReference {
 impl From<CrossReference> for DbCrossReference {
     fn from(c: CrossReference) -> Self {
         Self {
-            id: c.id.unwrap_or_default(),
+            id: c.id,
             source_book: String::new(),
             source_chapter: 0,
             source_verse: c.from_verse_id,

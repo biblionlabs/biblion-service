@@ -7,5 +7,5 @@ description.workspace = true
 
 [dependencies]
 common = { version = "0.1.0", path = "../common" }
-limbo = "0.0.22"
+rusqlite = "0.37.0"
 serde.workspace = true

@@ -6,7 +6,7 @@ use crate::{Crud, FromRow, Queriable};
 use common::Verse;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DbVerse {
+pub struct DbVerseNote {
     pub id: i64,
     pub book_id: String,
     pub chapter: i32,
@@ -14,13 +14,13 @@ pub struct DbVerse {
     pub text: String,
 }
 
-impl Queriable for DbVerse {
-    const TABLE: &'static str = "verses";
+impl Queriable for DbVerseNote {
+    const TABLE: &'static str = "verse_notes";
     const FIELDS: &'static [&'static str] =
         &["id", "book_id", "chapter_number", "verse_number", "text"];
 }
 
-impl FromRow for DbVerse {
+impl FromRow for DbVerseNote {
     fn from_row(row: &Row) -> Result<Self> {
         Ok(Self {
             id: row.get("id")?,
@@ -32,7 +32,7 @@ impl FromRow for DbVerse {
     }
 }
 
-impl Crud for DbVerse {
+impl Crud for DbVerseNote {
     fn params<'a>(&'a self) -> Vec<&'a dyn rusqlite::ToSql> {
         vec![
             &self.id,
@@ -44,7 +44,7 @@ impl Crud for DbVerse {
     }
 }
 
-impl From<Verse> for DbVerse {
+impl From<Verse> for DbVerseNote {
     fn from(v: Verse) -> Self {
         Self {
             id: v.id,
