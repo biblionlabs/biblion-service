@@ -3,17 +3,20 @@ use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, SystemTime};
 
+use db::Crud;
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::list_option::ListOption;
 use inquire::validator::Validation;
 use inquire::{Confirm, MultiSelect};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use reqwest::Client;
 use serde_json::Value;
 
 mod models;
 
 use models::{BibleVariant, Book, CrossReference};
+
+use self::models::Reference;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -431,6 +434,198 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
     pb.finish_with_message("Bible fully cached");
+
+    println!("Generating DB");
+
+    let db = db::Sqlite::new(db_path).unwrap();
+    let conn = db.connection();
+
+    pb.reset();
+    pb.set_length(original_books.len() as _);
+    pb.println("Inserting Cross References");
+    original_books.par_iter().for_each(|book_id| {
+        let cross_path = format!("{cross_bible_dir}/{book_id}.json");
+        let data = fs::read_to_string(&cross_path).unwrap();
+        let data = serde_json::from_str::<CrossReference>(&data).unwrap();
+
+        data.par_iter().for_each(|(source_chapter, cross)| {
+            cross.par_iter().for_each(|(source_verse, cross)| {
+                let mut targets = 0;
+                let mut target_book = &Default::default();
+                let mut target_chapter = Vec::new();
+                let mut target_verse = Vec::new();
+                for target in cross {
+                    let mut iter = target.iter();
+                    if let Some(Reference::String(book)) = iter.next() {
+                        target_book = book;
+                    }
+                    let iter = iter.collect::<Vec<_>>();
+                    let iter = iter.chunks(2);
+                    targets = iter.clone().count();
+                    for target in iter {
+                        let mut iter = target.iter();
+                        if let Some(Reference::Integer(chapter)) = iter.next() {
+                            target_chapter.push(*chapter);
+                        }
+                        if let Some(Reference::Integer(verse)) = iter.next() {
+                            target_verse.push(*verse);
+                        }
+                    }
+                }
+
+                for t in 0..targets {
+                    let data = db::DbCrossReference {
+                        id: 0,
+                        source_book: book_id.clone(),
+                        source_chapter: source_chapter.parse().unwrap(),
+                        source_verse: source_verse.parse().unwrap(),
+                        target_book: target_book.clone(),
+                        target_chapter: target_chapter[t],
+                        target_verse: target_verse[t],
+                    };
+                    data.insert(conn.clone()).unwrap();
+                    pb.inc(1);
+                }
+            });
+        });
+    });
+    pb.finish_with_message("Update Cross References Table");
+
+    pb.reset();
+    pb.set_length(selected_lang_codes.len() as _);
+    pb.println("Inserting Languages");
+    let conn = db.connection();
+    selected_lang_codes.par_iter().for_each(|lang| {
+        let lang_manifest = manifest
+            .get("languages")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .get(lang)
+            .unwrap();
+        let data = db::DbLanguage {
+            id: lang.clone(),
+            direction: lang_manifest.get("direction").unwrap().to_string(),
+            name_local: lang_manifest.get("local").unwrap().to_string(),
+            name_english: lang_manifest.get("english").unwrap().to_string(),
+        };
+        data.insert_with_id(conn.clone()).unwrap();
+        pb.inc(1);
+    });
+    pb.finish_with_message("Update Langs Table");
+
+    pb.reset();
+    pb.set_length(selected_bible_ids.len() as _);
+    let conn = db.connection();
+    selected_bible_ids.par_iter().for_each(|(bible_id, books)| {
+        let manifest_bible = manifest.get("bibles").unwrap().get(bible_id).unwrap();
+        let language_id = bible_id.split_once("_").unwrap().0.to_string();
+
+        let bible_path = format!(".cache/bibles/{bible_id}/manifest.json");
+        let data = fs::read_to_string(&bible_path).unwrap();
+        let data = serde_json::from_str::<BibleVariant>(&data).unwrap();
+
+        let db_data = db::DbBible {
+            id: bible_id.clone(),
+            name_local: manifest_bible
+                .get("name")
+                .unwrap()
+                .get("local")
+                .unwrap()
+                .to_string(),
+            name_english: manifest_bible
+                .get("name")
+                .unwrap()
+                .get("english")
+                .unwrap()
+                .to_string(),
+            language_id: language_id.clone(),
+        };
+        pb.println(format!("Inserting Bible {}", db_data.name_local));
+        db_data.insert_with_id(conn.clone()).unwrap();
+
+        pb.println("Inserting Headers");
+        data.chapter_headings
+            .par_iter()
+            .for_each(|(book, chapter)| {
+                chapter
+                    .par_iter()
+                    .enumerate()
+                    .for_each(|(chapter, header)| {
+                        if header.is_empty() {
+                            return;
+                        }
+                        let data = db::DbHeader {
+                            id: 0,
+                            bible_id: bible_id.clone(),
+                            book_id: book.clone(),
+                            chapter: chapter as _,
+                            text: header.clone(),
+                        };
+                        data.insert(conn.clone()).unwrap();
+                    });
+            });
+
+        pb.println("Inserting books");
+        let conn = conn.clone();
+        books.par_iter().for_each(|book| {
+            let bible_dir = format!(".cache/bibles/{bible_id}");
+            pb.set_message(format!("Fill {book} table"));
+            let book_path = format!("{bible_dir}/books/{book}.json");
+
+            let data = fs::read_to_string(&book_path).unwrap();
+            let data_book = serde_json::from_str::<Book>(&data).unwrap();
+            let data: db::DbBook = db::DbBook {
+                id: book.clone(),
+                bible_id: bible_id.clone(),
+                name_normal: data_book.name.normal,
+                name_long: data_book.name.long,
+                name_abbrev: data_book.name.abbrev,
+            };
+            data.insert_with_id(conn.clone()).unwrap();
+
+            data_book
+                .contents
+                .par_iter()
+                .enumerate()
+                .for_each(|(chapter, content)| {
+                    content.par_iter().enumerate().for_each({
+                        let conn = conn.clone();
+                        move |(verse, content)| {
+                            for content in content {
+                                match content {
+                                    models::Content::Note { contents, .. } => {
+                                        let data = db::DbVerseNote {
+                                            id: 0,
+                                            book_id: book.clone(),
+                                            chapter: chapter as _,
+                                            verse: verse as _,
+                                            text: contents.clone(),
+                                        };
+                                        data.insert(conn.clone()).unwrap();
+                                    }
+                                    models::Content::Raw(content) => {
+                                        let data = db::DbVerse {
+                                            id: 0,
+                                            book_id: book.clone(),
+                                            chapter: chapter as _,
+                                            verse: verse as _,
+                                            text: content.clone(),
+                                        };
+                                        data.insert(conn.clone()).unwrap();
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    })
+                });
+        });
+        pb.inc(1);
+    });
+    pb.finish_with_message("Update Books and Bibles Tables");
+
+    // Generate and fill database
 
     println!("\nSetup completed. Database created at: {db_path}");
     println!("Saved selection to .cache/selection.json");

@@ -1,8 +1,25 @@
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
 use serde::{Deserialize, Serialize};
 
-pub type CrossReference = HashMap<String, HashMap<String, Vec<Vec<Reference>>>>;
+pub type InnerCrossReference = HashMap<String, HashMap<String, Vec<Vec<Reference>>>>;
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrossReference(InnerCrossReference);
+
+impl Deref for CrossReference {
+    type Target = InnerCrossReference;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for CrossReference {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
