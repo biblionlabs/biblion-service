@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Language {
     pub id: String,
+    pub direction: String,
     pub english: String,
     pub local: String,
 }
@@ -22,13 +23,21 @@ pub struct Book {
     pub name: String,
     pub name_long: String,
     pub abbrev: String,
-    pub order: i32,
     pub testament: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Header {
+    pub id: i64,
+    pub bible_id: String,
+    pub book_id: String,
+    pub chapter: i32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Verse {
-    pub id: Option<i64>,
+    pub id: i64,
     pub book_id: String,
     pub chapter: i32,
     pub verse: i32,
@@ -37,7 +46,7 @@ pub struct Verse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossReference {
-    pub id: Option<i64>,
+    pub id: i64,
     pub from_verse_id: i32,
     pub to_verse_id: i32,
 }
