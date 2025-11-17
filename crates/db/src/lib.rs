@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection as SQLiteConnection, Params, Result, Row, ToSql, params_from_iter};
@@ -261,7 +262,7 @@ COMMIT;
 }
 
 impl Sqlite {
-    pub fn new(db: &str) -> Result<Self> {
+    pub fn new(db: impl AsRef<Path>) -> Result<Self> {
         let conn = rusqlite::Connection::open(db)?;
         let conn = Arc::new(Mutex::new(conn));
         let db = Self { conn };

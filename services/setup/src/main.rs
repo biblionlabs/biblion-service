@@ -12,11 +12,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIter
 use reqwest::Client;
 use serde_json::Value;
 
-mod models;
-
-use models::{BibleVariant, Book, CrossReference};
-
-use self::models::Reference;
+use models::{BibleVariant, Book, CrossReference, Reference};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
