@@ -1,101 +1,369 @@
+// Example CLI using setup_core and implementing DbSink using the repo's `db` crate.
+// This file replaces the previous main.rs and demonstrates how to:
+//  - show language/bible lists to user
+//  - add an extra bible with a books URL template
+//  - build a Selection and pass a DbSink to run_with_sink
+
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
-use std::sync::atomic::AtomicU64;
-use std::time::{Duration, SystemTime};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use db::Crud;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use inquire::list_option::ListOption;
 use inquire::validator::Validation;
 use inquire::{Confirm, MultiSelect};
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use reqwest::Client;
-use serde_json::Value;
 
-use models::{BibleVariant, Book, CrossReference, Reference};
+use setup_core::{CrossReference, DbSink, Event, Reference, Selection, SetupBuilder};
+
+// Example DbSink implementation that uses the repo's `db` crate to insert rows.
+// Adjust imports according to your crate layout.
+struct RepoDbSink {
+    // here we could keep a connection pool, etc.
+    // For demo purposes we'll open a new connection for each operation (not optimal).
+    conn: db::Connection,
+}
+
+impl From<String> for RepoDbSink {
+    fn from(db_path: String) -> Self {
+        let db = db::Sqlite::new(db_path).unwrap();
+        let conn = db.connection();
+        Self { conn }
+    }
+}
+
+impl DbSink for RepoDbSink {
+    async fn insert_cross_reference(
+        &self,
+        book: &str,
+        data: &CrossReference,
+    ) -> setup_core::Result<()> {
+        data.par_iter().for_each(|(source_chapter, cross)| {
+            cross.par_iter().for_each(|(source_verse, cross)| {
+                let mut targets = 0;
+                let mut target_book = &Default::default();
+                let mut target_chapter = Vec::new();
+                let mut target_verse = Vec::new();
+                for target in cross {
+                    let mut iter = target.iter();
+                    if let Some(Reference::String(book)) = iter.next() {
+                        target_book = book;
+                    }
+                    let iter = iter.collect::<Vec<_>>();
+                    let iter = iter.chunks(2);
+                    targets = iter.clone().count();
+                    for target in iter {
+                        let mut iter = target.iter();
+                        if let Some(Reference::Integer(chapter)) = iter.next() {
+                            target_chapter.push(*chapter);
+                        }
+                        if let Some(Reference::Integer(verse)) = iter.next() {
+                            target_verse.push(*verse);
+                        }
+                    }
+                }
+
+                for t in 0..targets {
+                    let data = db::DbCrossReference {
+                        id: 0,
+                        source_book: book.to_string(),
+                        source_chapter: source_chapter.parse().unwrap(),
+                        source_verse: source_verse.parse().unwrap(),
+                        target_book: target_book.clone(),
+                        target_chapter: target_chapter[t],
+                        target_verse: target_verse[t],
+                    };
+                    data.insert(self.conn.clone()).unwrap();
+                }
+            });
+        });
+        Ok(())
+    }
+
+    async fn insert_language(
+        &self,
+        lang_id: &str,
+        direction: &str,
+        name_local: &str,
+        name_english: &str,
+    ) -> setup_core::Result<()> {
+        let data = db::DbLanguage {
+            id: lang_id.to_string(),
+            direction: direction.to_string(),
+            name_local: name_local.to_string(),
+            name_english: name_english.to_string(),
+        };
+        data.insert_with_id(self.conn.clone()).unwrap();
+        Ok(())
+    }
+
+    async fn insert_bible(
+        &self,
+        bible_id: &str,
+        name_local: &str,
+        name_english: &str,
+        language_id: &str,
+    ) -> setup_core::Result<()> {
+        let data = db::DbBible {
+            id: bible_id.to_string(),
+            name_local: name_local.to_string(),
+            name_english: name_english.to_string(),
+            language_id: language_id.to_string(),
+        };
+        data.insert_with_id(self.conn.clone()).unwrap();
+        Ok(())
+    }
+
+    async fn insert_header(
+        &self,
+        bible_id: &str,
+        book_id: &str,
+        chapter: usize,
+        text: &str,
+    ) -> setup_core::Result<()> {
+        let data = db::DbHeader {
+            id: 0,
+            bible_id: bible_id.to_string(),
+            book_id: book_id.to_string(),
+            chapter: chapter as _,
+            text: text.to_string(),
+        };
+        data.insert(self.conn.clone()).unwrap();
+        Ok(())
+    }
+
+    async fn insert_book_meta(
+        &self,
+        bible_id: &str,
+        book_id: &str,
+        name_normal: &str,
+        name_long: &str,
+        name_abbrev: &str,
+    ) -> setup_core::Result<()> {
+        let data = db::DbBook {
+            id: book_id.to_string(),
+            bible_id: bible_id.to_string(),
+            name_normal: name_normal.to_string(),
+            name_long: name_long.to_string(),
+            name_abbrev: name_abbrev.to_string(),
+        };
+        data.insert_with_id(self.conn.clone()).unwrap();
+        Ok(())
+    }
+
+    async fn insert_verse(
+        &self,
+        book_id: &str,
+        chapter: usize,
+        verse: usize,
+        text: &str,
+    ) -> setup_core::Result<()> {
+        let data = db::DbVerse {
+            id: 0,
+            book_id: book_id.to_string(),
+            chapter: chapter as _,
+            verse: verse as _,
+            text: text.to_string(),
+        };
+        data.insert(self.conn.clone()).unwrap();
+        Ok(())
+    }
+
+    async fn insert_note(
+        &self,
+        book_id: &str,
+        chapter: usize,
+        verse: usize,
+        text: &str,
+    ) -> setup_core::Result<()> {
+        let data = db::DbVerseNote {
+            id: 0,
+            book_id: book_id.to_string(),
+            chapter: chapter as _,
+            verse: verse as _,
+            text: text.to_string(),
+        };
+        data.insert(self.conn.clone()).unwrap();
+        Ok(())
+    }
+
+    async fn finalize(&self) -> setup_core::Result<()> {
+        // any final steps like rebuilding indices
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=======================================");
-    println!("     Welcome to Bible Setup CLI");
+    println!("     Welcome to Bible Setup CLI (with DbSink)");
     println!("=======================================\n");
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent("bible-downloader/0.1 (rust)")
-        .build()?;
+    let mp = Arc::new(MultiProgress::new());
+    let bars: Arc<Mutex<HashMap<String, ProgressBar>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    let cache_path = ".cache/manifest.json";
-    let need_download = if Path::new(cache_path).exists() {
-        match fs::metadata(cache_path)?.modified() {
-            Ok(modified) => match SystemTime::now().duration_since(modified) {
-                Ok(elapsed) => elapsed > Duration::from_secs(60 * 60 * 24 * 30),
-                Err(_) => true,
-            },
-            Err(_) => true,
+    let event_cb = {
+        let mp = mp.clone();
+        let bars = bars.clone();
+        move |ev: Event| {
+            match ev {
+                Event::Message(msg) => {
+                    // Mensaje informativo rápido (se muestra y se limpia)
+                    let pb = mp.add(ProgressBar::new_spinner());
+                    let style = ProgressStyle::with_template("{spinner} {msg}")
+                        .unwrap()
+                        .tick_chars("⠋⠙⠹⠸⠼⠴");
+                    pb.set_style(style);
+                    pb.set_message(msg);
+                    // dejamos tick por un instante y luego limpiamos
+                    pb.enable_steady_tick(Duration::from_millis(80));
+                    pb.finish_and_clear();
+                }
+
+                Event::Progress {
+                    step,
+                    current,
+                    total,
+                } => {
+                    // Barra por "step" con longitud conocida
+                    let key = format!("progress:{}", step);
+                    let mut map = bars.lock().unwrap();
+                    let pb = map.entry(key.clone()).or_insert_with(|| {
+                    let p = mp.add(ProgressBar::new(total));
+                    p.set_style(
+                        ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}")
+                            .unwrap()
+                            .progress_chars("=> "),
+                    );
+                    p.set_message(step.clone());
+                    p
+                });
+                    pb.set_length(total);
+                    pb.set_position(current);
+                    if current >= total {
+                        pb.finish_with_message(format!("{step} complete"));
+                        map.remove(&key);
+                    }
+                }
+
+                Event::ManifestReady { path, .. } => {
+                    let pb = mp.add(ProgressBar::new_spinner());
+                    let style = ProgressStyle::with_template("{spinner} {msg}")
+                        .unwrap()
+                        .tick_chars("⠋⠙⠹⠸⠼⠴");
+                    pb.set_style(style);
+                    pb.set_message(format!("Manifest ready: {}", path.display()));
+                    pb.finish_with_message("Manifest cached");
+                }
+
+                Event::CrossRefCached { book_id, path } => {
+                    let pb = mp.add(ProgressBar::new_spinner());
+                    pb.set_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("⠋⠙⠹"),
+                    );
+                    pb.set_message(format!(
+                        "CrossRef cached: {} -> {}",
+                        book_id,
+                        path.display()
+                    ));
+                    pb.finish_and_clear();
+                }
+
+                Event::BibleManifestCached { bible_id, path } => {
+                    let pb = mp.add(ProgressBar::new_spinner());
+                    pb.set_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("⠋⠙⠹"),
+                    );
+                    pb.set_message(format!(
+                        "Bible manifest: {} -> {}",
+                        bible_id,
+                        path.display()
+                    ));
+                    pb.finish_and_clear();
+                }
+
+                Event::BibleBookCached {
+                    bible_id,
+                    book_id,
+                    path: _,
+                } => {
+                    // Barra acumulativa por Biblia (cuenta libros descargados)
+                    let key = format!("books:{}", bible_id);
+                    let mut map = bars.lock().unwrap();
+                    let pb = map.entry(key.clone()).or_insert_with(|| {
+                        let p = mp.add(ProgressBar::new(0)); // longitud desconocida al principio
+                        p.set_style(
+                            ProgressStyle::with_template("{spinner} {msg}")
+                                .unwrap()
+                                .tick_chars("⠋⠙⠹"),
+                        );
+                        p.set_message(format!("Downloading books for {bible_id}"));
+                        p.enable_steady_tick(Duration::from_millis(80));
+                        p
+                    });
+                    // incrementamos contador (si queremos longitud conocida, el event Progress la manejará)
+                    pb.inc(1);
+                    pb.set_message(format!("{bible_id}: {book_id}"));
+                }
+
+                Event::SelectionSaved { path } => {
+                    let pb = mp.add(ProgressBar::new_spinner());
+                    pb.set_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("⠋⠙"),
+                    );
+                    pb.set_message(format!("Selection saved: {}", path.display()));
+                    pb.finish_and_clear();
+                }
+
+                Event::Completed => {
+                    // final; cerramos todo con mensaje
+                    let finish_pb = mp.add(ProgressBar::new_spinner());
+                    finish_pb.set_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("⠁⠂⠄"),
+                    );
+                    finish_pb.set_message("Setup completed successfully");
+                    finish_pb.finish_with_message("Done");
+                }
+
+                Event::Error(e) => {
+                    // errores van a stderr y también mostramos con indicatif
+                    eprintln!("Setup error: {}", e);
+                    let pb = mp.add(ProgressBar::new_spinner());
+                    pb.set_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("!!"),
+                    );
+                    pb.set_message(format!("Error: {}", e));
+                    pb.finish_and_clear();
+                }
+            }
         }
-    } else {
-        true
     };
 
-    let manifest: Value = if need_download {
-        let pb = ProgressBar::new_spinner();
-        let style = ProgressStyle::with_template("{spinner} {msg}")
-            .unwrap()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
-        pb.set_style(style);
-        pb.set_message("Downloading manifest...");
-        pb.enable_steady_tick(Duration::from_millis(120));
+    // Build Setup orchestrator
+    let (_client, setup) = SetupBuilder::new()
+        .cache_path(".cache")
+        // Add Reina Valera 1960 Bible
+        .add_bible_from_url("spa_rv1960", "https://raw.githubusercontent.com/biblionlabs/extra_data_source/refs/heads/main/bibles/spa_rv1960/manifest.json", "https://raw.githubusercontent.com/biblionlabs/extra_data_source/refs/heads/main/bibles/spa_rv1960/desc.json", Some("https://raw.githubusercontent.com/biblionlabs/extra_data_source/refs/heads/main/bibles/{bible_id}/books/{book}.json"))
+        .on_event(event_cb)
+        .build();
 
-        let content = client
-            .get("https://v1.fetch.bible/manifest.json")
-            .send()
-            .await?
-            .text()
-            .await?;
-
-        pb.finish_with_message("Manifest downloaded");
-
-        fs::create_dir_all(".cache")?;
-        fs::write(cache_path, content.as_bytes())?;
-
-        serde_json::from_str(&content)?
-    } else {
-        let content = fs::read(cache_path)?;
-        serde_json::from_slice(&content)?
-    };
-
-    let original_books = manifest
-        .get("book_names_english")
-        .ok_or("manifest missing book names")?
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect::<Vec<String>>();
-    let languages_obj = manifest
-        .get("languages")
-        .and_then(|v| v.as_object())
-        .ok_or("manifest missing languages")?;
-    let mut language_entries: Vec<(String, String, String)> = languages_obj
-        .iter()
-        .map(|(k, v)| {
-            let english = v
-                .get("english")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            let local = v
-                .get("local")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            (k.clone(), english, local)
-        })
-        .collect();
-    language_entries.sort_by(|a, b| a.1.cmp(&b.1));
-
-    let language_options = language_entries
+    // Example: fetch lists for UI prompts
+    let languages = setup.list_languages().await?;
+    let language_options = languages
         .iter()
         .enumerate()
         .map(|(i, (_, eng, loc))| ListOption::new(i, format!("{eng} ({loc})")))
@@ -113,36 +381,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .prompt()?;
 
-    let bibles_obj = manifest
-        .get("bibles")
-        .and_then(|v| v.as_object())
-        .ok_or("manifest missing bibles")?;
-    let mut bible_entries: Vec<(String, String, String, String)> = bibles_obj
-        .iter()
-        .map(|(k, v)| {
-            let local = v
-                .get("name")
-                .and_then(|n| n.get("local"))
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let english = v
-                .get("name")
-                .and_then(|n| n.get("english"))
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let language = v
-                .get("language")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string();
-            (k.clone(), local, english, language)
-        })
-        .collect();
-    bible_entries.sort_by(|a, b| a.2.cmp(&b.2));
-
-    let bible_options = bible_entries
+    // list bibles
+    let bibles = setup.list_bibles().await?;
+    let bible_options = bibles
         .iter()
         .enumerate()
         .map(|(i, (_, local, english, _))| {
@@ -176,18 +417,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut selected_lang_codes: Vec<String> = selected_lang_options
         .iter()
-        .map(|opt| language_entries[opt.index].0.clone())
+        .map(|opt| languages[opt.index].0.clone())
         .collect();
 
     let mut selected_bible_ids: Vec<String> = selected_bible_options
         .iter()
-        .map(|opt| bible_entries[opt.index].0.clone())
+        .map(|opt| bibles[opt.index].0.clone())
         .collect();
 
     let mut originals_added: Vec<String> = Vec::new();
 
     if include_originals {
-        for (code, eng, loc) in &language_entries {
+        for (code, eng, loc) in &languages {
             let low_eng = eng.to_lowercase();
             let low_loc = loc.to_lowercase();
             if (code == "grc"
@@ -204,18 +445,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         selected_bible_ids.extend_from_slice(&[
-            // Griego de la Septuaginta (LXX - AT)
-            "grc_bre".into(), // Brenton's Septuagint Text (1870)
-            // Griego del Nuevo Testamento
-            "grc_sr".into(),  // Statistical Restoration Greek New Testament (2024)
-            "grc_sbl".into(), // SBL Greek New Testament (2010)
-            //
-            // COMPLEMENTARIAS - Para análisis textual
-            "grc_tr".into(), // Textus Receptus (1881)
-            "grc_rp".into(), // Byzantine Textform (Robinson-Pierpont)
-            //
-            // VERSIONES ANTIGUAS IMPORTANTES
-            "cop_shc".into(), // Coptic Sahidic New Testament (siglos II-IV)
+            "grc_bre".into(),
+            "grc_sr".into(),
+            "grc_sbl".into(),
+            "grc_tr".into(),
+            "grc_rp".into(),
+            "cop_shc".into(),
         ]);
     }
 
@@ -231,7 +466,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         originals_added.len()
     );
     for code in &selected_lang_codes {
-        if let Some((_, eng, loc)) = language_entries.iter().find(|(k, _, _)| k == code) {
+        if let Some((_, eng, loc)) = languages.iter().find(|(k, _, _)| k == code) {
             let mark = if originals_added.contains(code) {
                 " (original)"
             } else {
@@ -252,7 +487,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected_bible_ids.len()
     );
     for id in &selected_bible_ids {
-        if let Some((_, local, english, lang)) = bible_entries.iter().find(|(k, _, _, _)| k == id) {
+        if let Some((_, local, english, lang)) = bibles.iter().find(|(k, _, _, _)| k == id) {
             println!(
                 "    - {}{}",
                 if local.is_empty() { english } else { local },
@@ -277,353 +512,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     fs::create_dir_all(".cache")?;
-    let selection = serde_json::json!({
-        "languages": selected_lang_codes,
-        "bibles": selected_bible_ids,
-        "originals_added": originals_added,
-        "include_originals": include_originals
-    });
-    fs::write(
-        ".cache/selection.json",
-        serde_json::to_vec_pretty(&selection)?,
-    )?;
+    let selection = Selection {
+        languages: selected_lang_codes.clone(),
+        bibles: selected_bible_ids.clone(),
+        originals_added: originals_added.clone(),
+        include_originals,
+    };
 
-    let db_path = "bible.db";
-    let current_handler = tokio::runtime::Handle::current();
+    // Create DB sink and run the orchestrator
+    let sink = RepoDbSink::from("bible.db".to_string());
+    setup.run_with_sink(selection, sink).await.map_err(|e| {
+        println!("Setup failed: {e}");
+        e
+    })?;
 
-    println!("Start setup Cross References");
-    let cross_bible_dir = ".cache/cross";
-    fs::create_dir_all(cross_bible_dir)?;
+    println!("\nSetup completed. Cached files are in .cache and DB created at bible.db");
 
-    let pb = ProgressBar::new(original_books.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}",
-        )
-        .unwrap()
-        .progress_chars("=> "),
-    );
-
-    original_books.par_iter().for_each(|book_id| {
-        current_handler.block_on(async {
-            let cross_path = format!("{cross_bible_dir}/{book_id}.json");
-
-            let data = if Path::new(&cross_path).exists() {
-                fs::read_to_string(&cross_path).unwrap()
-            } else {
-                match client
-                    .get(format!(
-                        "https://v1.fetch.bible/crossref/large/{book_id}.json"
-                    ))
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        let text = resp.text().await.unwrap();
-                        fs::write(&cross_path, &text).unwrap();
-                        text
-                    }
-                    _ => {
-                        pb.println(format!("  Skipped {book_id} (failed and no cache)"));
-                        return;
-                    }
-                }
-            };
-
-            if let Err(e) = serde_json::from_str::<CrossReference>(&data) {
-                pb.println(format!("  Error parsing {book_id}: {e}"));
-            }
-
-            pb.inc(1);
-        });
-    });
-    pb.finish_with_message("Validate and cached Cross References");
-    pb.reset();
-
-    println!("Start setup Bible Sources");
-
-    let c = AtomicU64::default();
-    let selected_bible_ids = selected_bible_ids
-        .par_iter()
-        .flat_map(|bible_id| {
-            current_handler.block_on(async {
-                let bible_dir = format!(".cache/bibles/{bible_id}");
-                let bible_manifest_path = format!(".cache/bibles/{bible_id}/manifest.json");
-                fs::create_dir_all(&bible_dir).ok()?;
-
-                println!("Start setup of {bible_id}");
-
-                let bible_manifest: BibleVariant = match client
-                    .get(format!(
-                        "https://v1.fetch.bible/bibles/{bible_id}/extra.json"
-                    ))
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        let text = resp.text().await.ok()?;
-                        fs::create_dir_all(format!("{bible_dir}/books")).ok()?;
-                        fs::write(&bible_manifest_path, &text).ok()?;
-                        serde_json::from_str(&text).ok()?
-                    }
-                    _ => {
-                        if Path::new(&bible_manifest_path).exists() {
-                            println!("  Using cached manifest.json");
-                            serde_json::from_str(&fs::read_to_string(&bible_manifest_path).ok()?)
-                                .ok()?
-                        } else {
-                            println!("  Failed to fetch and no cache found for {bible_id}");
-                            return None;
-                        }
-                    }
-                };
-
-                let books: Vec<String> = bible_manifest.book_names.keys().cloned().collect();
-                c.fetch_add(books.len() as u64, std::sync::atomic::Ordering::SeqCst);
-
-                Some((bible_id.clone(), books))
-            })
-        })
-        .collect::<Vec<(String, Vec<_>)>>();
-
-    pb.set_length(c.load(std::sync::atomic::Ordering::Relaxed));
-
-    selected_bible_ids.par_iter().for_each(|(bible_id, books)| {
-        books.par_iter().for_each(|book| {
-            current_handler.block_on(async {
-                let bible_dir = format!(".cache/bibles/{bible_id}");
-                pb.set_message(format!("Downloading {book}.json"));
-                let book_url = format!("https://v1.fetch.bible/bibles/{bible_id}/txt/{book}.json");
-                let book_path = format!("{bible_dir}/books/{book}.json");
-
-                let data = if Path::new(&book_path).exists() {
-                    fs::read_to_string(&book_path).unwrap()
-                } else {
-                    match client.get(&book_url).send().await {
-                        Ok(resp) if resp.status().is_success() => {
-                            let text = resp.text().await.unwrap();
-                            fs::write(&book_path, &text).unwrap();
-                            text
-                        }
-                        _ => {
-                            pb.println(format!("  Skipped {book} (failed and no cache)"));
-                            return;
-                        }
-                    }
-                };
-
-                match serde_json::from_str::<Book>(&data) {
-                    Ok(parsed) => {
-                        let chapters = parsed.contents.len();
-                        pb.println(format!(
-                            "  Parsed {}: {chapters} chapters loaded.",
-                            parsed.name.long
-                        ));
-                    }
-                    Err(e) => {
-                        pb.println(format!("  Error parsing {book}: {e}"));
-                    }
-                }
-
-                pb.inc(1);
-            })
-        });
-    });
-    pb.finish_with_message("Bible fully cached");
-
-    println!("Generating DB");
-
-    let db = db::Sqlite::new(db_path).unwrap();
-    let conn = db.connection();
-
-    pb.reset();
-    pb.set_length(original_books.len() as _);
-    pb.println("Inserting Cross References");
-    original_books.par_iter().for_each(|book_id| {
-        let cross_path = format!("{cross_bible_dir}/{book_id}.json");
-        let data = fs::read_to_string(&cross_path).unwrap();
-        let data = serde_json::from_str::<CrossReference>(&data).unwrap();
-
-        data.par_iter().for_each(|(source_chapter, cross)| {
-            cross.par_iter().for_each(|(source_verse, cross)| {
-                let mut targets = 0;
-                let mut target_book = &Default::default();
-                let mut target_chapter = Vec::new();
-                let mut target_verse = Vec::new();
-                for target in cross {
-                    let mut iter = target.iter();
-                    if let Some(Reference::String(book)) = iter.next() {
-                        target_book = book;
-                    }
-                    let iter = iter.collect::<Vec<_>>();
-                    let iter = iter.chunks(2);
-                    targets = iter.clone().count();
-                    for target in iter {
-                        let mut iter = target.iter();
-                        if let Some(Reference::Integer(chapter)) = iter.next() {
-                            target_chapter.push(*chapter);
-                        }
-                        if let Some(Reference::Integer(verse)) = iter.next() {
-                            target_verse.push(*verse);
-                        }
-                    }
-                }
-
-                for t in 0..targets {
-                    let data = db::DbCrossReference {
-                        id: 0,
-                        source_book: book_id.clone(),
-                        source_chapter: source_chapter.parse().unwrap(),
-                        source_verse: source_verse.parse().unwrap(),
-                        target_book: target_book.clone(),
-                        target_chapter: target_chapter[t],
-                        target_verse: target_verse[t],
-                    };
-                    data.insert(conn.clone()).unwrap();
-                    pb.inc(1);
-                }
-            });
-        });
-    });
-    pb.finish_with_message("Update Cross References Table");
-
-    pb.reset();
-    pb.set_length(selected_lang_codes.len() as _);
-    pb.println("Inserting Languages");
-    let conn = db.connection();
-    selected_lang_codes.par_iter().for_each(|lang| {
-        let lang_manifest = manifest
-            .get("languages")
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .get(lang)
-            .unwrap();
-        let data = db::DbLanguage {
-            id: lang.clone(),
-            direction: lang_manifest.get("direction").unwrap().to_string(),
-            name_local: lang_manifest.get("local").unwrap().to_string(),
-            name_english: lang_manifest.get("english").unwrap().to_string(),
-        };
-        data.insert_with_id(conn.clone()).unwrap();
-        pb.inc(1);
-    });
-    pb.finish_with_message("Update Langs Table");
-
-    pb.reset();
-    pb.set_length(selected_bible_ids.len() as _);
-    let conn = db.connection();
-    selected_bible_ids.par_iter().for_each(|(bible_id, books)| {
-        let manifest_bible = manifest.get("bibles").unwrap().get(bible_id).unwrap();
-        let language_id = bible_id.split_once("_").unwrap().0.to_string();
-
-        let bible_path = format!(".cache/bibles/{bible_id}/manifest.json");
-        let data = fs::read_to_string(&bible_path).unwrap();
-        let data = serde_json::from_str::<BibleVariant>(&data).unwrap();
-
-        let db_data = db::DbBible {
-            id: bible_id.clone(),
-            name_local: manifest_bible
-                .get("name")
-                .unwrap()
-                .get("local")
-                .unwrap()
-                .to_string(),
-            name_english: manifest_bible
-                .get("name")
-                .unwrap()
-                .get("english")
-                .unwrap()
-                .to_string(),
-            language_id: language_id.clone(),
-        };
-        pb.println(format!("Inserting Bible {}", db_data.name_local));
-        db_data.insert_with_id(conn.clone()).unwrap();
-
-        pb.println("Inserting Headers");
-        data.chapter_headings
-            .par_iter()
-            .for_each(|(book, chapter)| {
-                chapter
-                    .par_iter()
-                    .enumerate()
-                    .for_each(|(chapter, header)| {
-                        if header.is_empty() {
-                            return;
-                        }
-                        let data = db::DbHeader {
-                            id: 0,
-                            bible_id: bible_id.clone(),
-                            book_id: book.clone(),
-                            chapter: chapter as _,
-                            text: header.clone(),
-                        };
-                        data.insert(conn.clone()).unwrap();
-                    });
-            });
-
-        pb.println("Inserting books");
-        let conn = conn.clone();
-        books.par_iter().for_each(|book| {
-            let bible_dir = format!(".cache/bibles/{bible_id}");
-            pb.set_message(format!("Fill {book} table"));
-            let book_path = format!("{bible_dir}/books/{book}.json");
-
-            let data = fs::read_to_string(&book_path).unwrap();
-            let data_book = serde_json::from_str::<Book>(&data).unwrap();
-            let data: db::DbBook = db::DbBook {
-                id: book.clone(),
-                bible_id: bible_id.clone(),
-                name_normal: data_book.name.normal,
-                name_long: data_book.name.long,
-                name_abbrev: data_book.name.abbrev,
-            };
-            data.insert_with_id(conn.clone()).unwrap();
-
-            data_book
-                .contents
-                .par_iter()
-                .enumerate()
-                .for_each(|(chapter, content)| {
-                    content.par_iter().enumerate().for_each({
-                        let conn = conn.clone();
-                        move |(verse, content)| {
-                            for content in content {
-                                match content {
-                                    models::Content::Note { contents, .. } => {
-                                        let data = db::DbVerseNote {
-                                            id: 0,
-                                            book_id: book.clone(),
-                                            chapter: chapter as _,
-                                            verse: verse as _,
-                                            text: contents.clone(),
-                                        };
-                                        data.insert(conn.clone()).unwrap();
-                                    }
-                                    models::Content::Raw(content) => {
-                                        let data = db::DbVerse {
-                                            id: 0,
-                                            book_id: book.clone(),
-                                            chapter: chapter as _,
-                                            verse: verse as _,
-                                            text: content.clone(),
-                                        };
-                                        data.insert(conn.clone()).unwrap();
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    })
-                });
-        });
-        pb.inc(1);
-    });
-    pb.finish_with_message("Update Books and Bibles Tables");
-
-    // Generate and fill database
-
-    println!("\nSetup completed. Database created at: {db_path}");
-    println!("Saved selection to .cache/selection.json");
     Ok(())
 }

@@ -6,12 +6,13 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+db = { version = "0.1", path = "../../crates/db" }
+indicatif = "0.18"
+inquire = "0.7"
+rayon = "1"
 reqwest.workspace = true
 serde.workspace = true
-clap = { version = "4.5", features = ["derive", "env"] }
-inquire = "0.7"
-tokio.workspace = true
 serde_json.workspace = true
-indicatif = "0.18"
-rayon = "1"
-db = { version = "0.1.0", path = "../../crates/db" }
+setup_core = { version = "0.1", path = "../../crates/setup" }
+tokio.workspace = true
