@@ -8,16 +8,20 @@
 #![warn(async_fn_in_trait)]
 
 use parking_lot::Mutex;
-use reqwest::{Client, ClientBuilder};
+use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+mod builder;
+mod db;
 mod error;
 mod models;
 
+pub use builder::*;
+pub use db::*;
 pub use error::{Result, Setup as Error};
 pub use models::*;
 
@@ -54,190 +58,26 @@ pub enum Event {
     Error(String),
 }
 
+trait TEvent {
+    type Args;
+}
+struct Completed;
+struct Progress;
+impl TEvent for Completed {
+    type Args = ();
+}
+
+impl TEvent for Progress {
+    type Args = (String, u64, u64);
+}
+
 /// Selection struct for the pipeline (can be constructed by UI from helper methods)
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Selection {
     pub languages: Vec<String>,
     pub bibles: Vec<String>,
     pub originals_added: Vec<String>,
     pub include_originals: bool,
-}
-
-/// When adding an "extra bible" we can specify manifest_url and optionally a template
-/// for book URLs. The template can include {bible_id} and {book} placeholders, e.g.
-/// "https://mycdn.example/bibles/{bible_id}/txt/{book}.json"
-#[derive(Debug, Clone)]
-pub struct ExtraBible {
-    pub id: String,
-    pub manifest_url: String,
-    pub desc_url: String,
-    pub book_url_template: Option<String>,
-}
-
-/// Builder for Setup
-pub struct SetupBuilder {
-    client: ClientBuilder,
-    cache_path: PathBuf,
-    include_originals: bool,
-    extra_bibles: Vec<ExtraBible>,
-    callbacks: Vec<Arc<dyn Fn(Event) + Send + Sync>>,
-    manifest_ttl: Duration,
-}
-
-const APP_USER_AGENT: &str = concat!("biblion-setup", "/", env!("CARGO_PKG_VERSION"), "(rust)");
-
-impl Default for SetupBuilder {
-    fn default() -> Self {
-        Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(30))
-                .user_agent(APP_USER_AGENT),
-            cache_path: PathBuf::from(".cache"),
-            include_originals: true,
-            extra_bibles: Vec::new(),
-            callbacks: Vec::new(),
-            manifest_ttl: Duration::from_secs(60 * 60 * 24 * 30),
-        }
-    }
-}
-
-impl SetupBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn client(mut self, cb: impl Fn(ClientBuilder) -> ClientBuilder) -> Self {
-        self.client = cb(self.client);
-        self
-    }
-
-    pub fn cache_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
-        self.cache_path = path.into();
-        self
-    }
-
-    pub fn include_originals(mut self, value: bool) -> Self {
-        self.include_originals = value;
-        self
-    }
-
-    /// Add an extra bible manifest URL with an optional books URL template.
-    pub fn add_bible_from_url<S: Into<String>>(
-        mut self,
-        id: S,
-        manifest_url: S,
-        desc_url: S,
-        book_url_template: Option<S>,
-    ) -> Self {
-        self.extra_bibles.push(ExtraBible {
-            id: id.into(),
-            desc_url: desc_url.into(),
-            manifest_url: manifest_url.into(),
-            book_url_template: book_url_template.map(|s| s.into()),
-        });
-        self
-    }
-
-    pub fn on_event<F>(mut self, cb: F) -> Self
-    where
-        F: Fn(Event) + Send + Sync + 'static,
-    {
-        self.callbacks.push(Arc::new(cb));
-        self
-    }
-
-    pub fn build(self) -> (Client, Setup) {
-        let client = self.client.build().expect("valid client");
-        (
-            client.clone(),
-            Setup {
-                client,
-                cache_path: self.cache_path,
-                include_originals: self.include_originals,
-                extra_bibles: self.extra_bibles,
-                callbacks: Arc::new(Mutex::new(self.callbacks)),
-                manifest_ttl: self.manifest_ttl,
-            },
-        )
-    }
-}
-
-/// Trait that consumers implement to receive parsed data and insert to DB.
-///
-/// Methods are async so sinking can perform DB I/O concurrently.
-pub trait DbSink: Send + Sync {
-    async fn insert_cross_reference(
-        &self,
-        _book: &str,
-        _data: &models::CrossReference,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn insert_language(
-        &self,
-        _lang_id: &str,
-        _direction: &str,
-        _name_local: &str,
-        _name_english: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn insert_bible(
-        &self,
-        _bible_id: &str,
-        _name_local: &str,
-        _name_english: &str,
-        _language_id: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn insert_header(
-        &self,
-        _bible_id: &str,
-        _book_id: &str,
-        _chapter: usize,
-        _text: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn insert_book_meta(
-        &self,
-        _bible_id: &str,
-        _book_id: &str,
-        _name_normal: &str,
-        _name_long: &str,
-        _name_abbrev: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn insert_verse(
-        &self,
-        _book_id: &str,
-        _chapter: usize,
-        _verse: usize,
-        _text: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn insert_note(
-        &self,
-        _book_id: &str,
-        _chapter: usize,
-        _verse: usize,
-        _text: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn finalize(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// The main orchestrator

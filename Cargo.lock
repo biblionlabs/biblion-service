@@ -1314,7 +1314,9 @@ dependencies = [
 name = "setup_core"
 version = "0.1.0"
 dependencies = [
+ "db",
  "parking_lot",
+ "rayon",
  "reqwest",
  "serde",
  "serde_json",
