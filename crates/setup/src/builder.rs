@@ -1,3 +1,5 @@
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -5,7 +7,8 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use reqwest::{Client, ClientBuilder};
 
-use crate::{Event, Setup};
+use crate::Setup;
+use crate::event::Event;
 
 /// When adding an "extra bible" we can specify manifest_url and optionally a template
 /// for book URLs. The template can include {bible_id} and {book} placeholders, e.g.
@@ -24,7 +27,7 @@ pub struct SetupBuilder {
     cache_path: PathBuf,
     include_originals: bool,
     extra_bibles: Vec<ExtraBible>,
-    callbacks: Vec<Arc<dyn Fn(Event) + Send + Sync>>,
+    callbacks: HashMap<TypeId, Arc<dyn Any>>,
     manifest_ttl: Duration,
 }
 
@@ -39,7 +42,7 @@ impl Default for SetupBuilder {
             cache_path: PathBuf::from(".cache"),
             include_originals: true,
             extra_bibles: Vec::new(),
-            callbacks: Vec::new(),
+            callbacks: HashMap::new(),
             manifest_ttl: Duration::from_secs(60 * 60 * 24 * 30),
         }
     }
@@ -82,11 +85,9 @@ impl SetupBuilder {
         self
     }
 
-    pub fn on_event<F>(mut self, cb: F) -> Self
-    where
-        F: Fn(Event) + Send + Sync + 'static,
-    {
-        self.callbacks.push(Arc::new(cb));
+    pub fn on<E: Event>(mut self, callback: impl Fn(E::Args) + Send + Sync + 'static) -> Self {
+        let type_id = TypeId::of::<E>();
+        self.callbacks.insert(type_id, Arc::new(callback));
         self
     }
 

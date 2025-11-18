@@ -6,19 +6,15 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use db::Crud;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use inquire::list_option::ListOption;
 use inquire::validator::Validation;
 use inquire::{Confirm, MultiSelect};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use reqwest::Client;
 
-use setup_core::{CrossReference, DbSink, Event, Reference, Selection, SetupBuilder};
+use setup_core::{Selection, SetupBuilder, SqliteDbSink, event};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,12 +25,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mp = Arc::new(MultiProgress::new());
     let bars: Arc<Mutex<HashMap<String, ProgressBar>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    let event_cb = {
-        let mp = mp.clone();
-        let bars = bars.clone();
-        move |ev: Event| {
-            match ev {
-                Event::Message(msg) => {
+    // Build Setup orchestrator
+    let (_client, setup) = SetupBuilder::new()
+        .cache_path(".cache")
+        // Add Reina Valera 1960 Bible
+        .add_bible_from_url("spa_rv1960", "https://raw.githubusercontent.com/biblionlabs/extra_data_source/refs/heads/main/bibles/spa_rv1960/manifest.json", "https://raw.githubusercontent.com/biblionlabs/extra_data_source/refs/heads/main/bibles/spa_rv1960/desc.json", Some("https://raw.githubusercontent.com/biblionlabs/extra_data_source/refs/heads/main/bibles/{bible_id}/books/{book}.json"))
+        .on::<event::Message>({
+            let mp = mp.clone();
+            move |msg| {
                     // Mensaje informativo rápido (se muestra y se limpia)
                     let pb = mp.add(ProgressBar::new_spinner());
                     let style = ProgressStyle::with_template("{spinner} {msg}")
@@ -45,15 +43,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // dejamos tick por un instante y luego limpiamos
                     pb.enable_steady_tick(Duration::from_millis(80));
                     pb.finish_and_clear();
-                }
-
-                Event::Progress {
-                    step,
-                    current,
-                    total,
-                } => {
+            }
+        })
+        .on::<event::Error>({
+            let mp = mp.clone();
+            move |e| {
+                    // errores van a stderr y también mostramos con indicatif
+                    eprintln!("Setup error: {e}");
+                    let pb = mp.add(ProgressBar::new_spinner());
+                    pb.set_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("!!"),
+                    );
+                    pb.set_message(format!("Error: {}", e));
+                    pb.finish_and_clear();
+            }
+        })
+        .on::<event::Completed>({
+            let mp = mp.clone();
+            move |()| {
+                    // final; cerramos todo con mensaje
+                    let finish_pb = mp.add(ProgressBar::new_spinner());
+                    finish_pb.set_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("⠁⠂⠄"),
+                    );
+                    finish_pb.set_message("Setup completed successfully");
+                    finish_pb.finish_with_message("Done");
+            }
+        })
+        .on::<event::ManifestReady>({
+            let mp = mp.clone();
+            move |(_, path)| {
+                    let pb = mp.add(ProgressBar::new_spinner());
+                    let style = ProgressStyle::with_template("{spinner} {msg}")
+                        .unwrap()
+                        .tick_chars("⠋⠙⠹⠸⠼⠴");
+                    pb.set_style(style);
+                    pb.set_message(format!("Manifest ready: {path:?}"));
+                    pb.finish_with_message("Manifest cached");
+            }
+        })
+        .on::<event::Progress>({
+            let mp = mp.clone();
+            let bars = bars.clone();
+            move |(step, current, total)| {
                     // Barra por "step" con longitud conocida
-                    let key = format!("progress:{}", step);
+                    let key = format!("progress:{step}");
                     let mut map = bars.lock().unwrap();
                     let pb = map.entry(key.clone()).or_insert_with(|| {
                     let p = mp.add(ProgressBar::new(total));
@@ -71,19 +109,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pb.finish_with_message(format!("{step} complete"));
                         map.remove(&key);
                     }
-                }
-
-                Event::ManifestReady { path, .. } => {
+            }
+        })
+        .on::<event::SelectionSaved>({
+            let mp = mp.clone();
+            move |path| {
                     let pb = mp.add(ProgressBar::new_spinner());
-                    let style = ProgressStyle::with_template("{spinner} {msg}")
-                        .unwrap()
-                        .tick_chars("⠋⠙⠹⠸⠼⠴");
-                    pb.set_style(style);
-                    pb.set_message(format!("Manifest ready: {}", path.display()));
-                    pb.finish_with_message("Manifest cached");
-                }
-
-                Event::CrossRefCached { book_id, path } => {
+                    pb.set_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("⠋⠙"),
+                    );
+                    pb.set_message(format!("Selection saved: {path:?}"));
+                    pb.finish_and_clear();
+            }
+        })
+        .on::<event::BibleManifestCached>({
+            let mp = mp.clone();
+            move |(bible_id, path)| {
                     let pb = mp.add(ProgressBar::new_spinner());
                     pb.set_style(
                         ProgressStyle::with_template("{spinner} {msg}")
@@ -91,14 +134,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .tick_chars("⠋⠙⠹"),
                     );
                     pb.set_message(format!(
-                        "CrossRef cached: {} -> {}",
-                        book_id,
-                        path.display()
+                        "Bible manifest: {bible_id} -> {path:?}",
                     ));
                     pb.finish_and_clear();
-                }
-
-                Event::BibleManifestCached { bible_id, path } => {
+            }
+        })
+        .on::<event::CrossRefCached>({
+            let mp = mp.clone();
+            move |(book_id, path)| {
                     let pb = mp.add(ProgressBar::new_spinner());
                     pb.set_style(
                         ProgressStyle::with_template("{spinner} {msg}")
@@ -106,20 +149,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .tick_chars("⠋⠙⠹"),
                     );
                     pb.set_message(format!(
-                        "Bible manifest: {} -> {}",
-                        bible_id,
-                        path.display()
+                        "CrossRef cached: {book_id} -> {path:?}",
                     ));
                     pb.finish_and_clear();
-                }
-
-                Event::BibleBookCached {
-                    bible_id,
-                    book_id,
-                    path: _,
-                } => {
+            }
+        })
+        .on::<event::BibleBookCached>({
+            let mp = mp.clone();
+            let bars = bars.clone();
+            move |(bible_id, book_id, _)| {
                     // Barra acumulativa por Biblia (cuenta libros descargados)
-                    let key = format!("books:{}", bible_id);
+                    let key = format!("books:{bible_id}");
                     let mut map = bars.lock().unwrap();
                     let pb = map.entry(key.clone()).or_insert_with(|| {
                         let p = mp.add(ProgressBar::new(0)); // longitud desconocida al principio
@@ -135,53 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // incrementamos contador (si queremos longitud conocida, el event Progress la manejará)
                     pb.inc(1);
                     pb.set_message(format!("{bible_id}: {book_id}"));
-                }
-
-                Event::SelectionSaved { path } => {
-                    let pb = mp.add(ProgressBar::new_spinner());
-                    pb.set_style(
-                        ProgressStyle::with_template("{spinner} {msg}")
-                            .unwrap()
-                            .tick_chars("⠋⠙"),
-                    );
-                    pb.set_message(format!("Selection saved: {}", path.display()));
-                    pb.finish_and_clear();
-                }
-
-                Event::Completed => {
-                    // final; cerramos todo con mensaje
-                    let finish_pb = mp.add(ProgressBar::new_spinner());
-                    finish_pb.set_style(
-                        ProgressStyle::with_template("{spinner} {msg}")
-                            .unwrap()
-                            .tick_chars("⠁⠂⠄"),
-                    );
-                    finish_pb.set_message("Setup completed successfully");
-                    finish_pb.finish_with_message("Done");
-                }
-
-                Event::Error(e) => {
-                    // errores van a stderr y también mostramos con indicatif
-                    eprintln!("Setup error: {}", e);
-                    let pb = mp.add(ProgressBar::new_spinner());
-                    pb.set_style(
-                        ProgressStyle::with_template("{spinner} {msg}")
-                            .unwrap()
-                            .tick_chars("!!"),
-                    );
-                    pb.set_message(format!("Error: {}", e));
-                    pb.finish_and_clear();
-                }
             }
-        }
-    };
-
-    // Build Setup orchestrator
-    let (_client, setup) = SetupBuilder::new()
-        .cache_path(".cache")
-        // Add Reina Valera 1960 Bible
-        .add_bible_from_url("spa_rv1960", "https://raw.githubusercontent.com/biblionlabs/extra_data_source/refs/heads/main/bibles/spa_rv1960/manifest.json", "https://raw.githubusercontent.com/biblionlabs/extra_data_source/refs/heads/main/bibles/spa_rv1960/desc.json", Some("https://raw.githubusercontent.com/biblionlabs/extra_data_source/refs/heads/main/bibles/{bible_id}/books/{book}.json"))
-        .on_event(event_cb)
+        })
         .build();
 
     // Example: fetch lists for UI prompts
@@ -343,7 +338,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create DB sink and run the orchestrator
-    let sink = RepoDbSink::from("bible.db".to_string());
+    let sink = SqliteDbSink::from("bible.db".to_string());
     setup.run_with_sink(selection, sink).await.map_err(|e| {
         println!("Setup failed: {e}");
         e

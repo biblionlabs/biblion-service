@@ -10,6 +10,7 @@
 use parking_lot::Mutex;
 use reqwest::Client;
 use serde_json::Value;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,56 +21,14 @@ mod db;
 mod error;
 mod models;
 
+pub mod event;
+
 pub use builder::*;
 pub use db::*;
 pub use error::{Result, Setup as Error};
 pub use models::*;
 
-/// Events for UI/logging
-#[derive(Debug, Clone)]
-pub enum Event {
-    Message(String),
-    Progress {
-        step: String,
-        current: u64,
-        total: u64,
-    },
-    ManifestReady {
-        manifest: Value,
-        path: PathBuf,
-    },
-    CrossRefCached {
-        book_id: String,
-        path: PathBuf,
-    },
-    BibleManifestCached {
-        bible_id: String,
-        path: PathBuf,
-    },
-    BibleBookCached {
-        bible_id: String,
-        book_id: String,
-        path: PathBuf,
-    },
-    SelectionSaved {
-        path: PathBuf,
-    },
-    Completed,
-    Error(String),
-}
-
-trait TEvent {
-    type Args;
-}
-struct Completed;
-struct Progress;
-impl TEvent for Completed {
-    type Args = ();
-}
-
-impl TEvent for Progress {
-    type Args = (String, u64, u64);
-}
+pub type Callback<Args> = Arc<dyn Fn(Args) + Send + Sync>;
 
 /// Selection struct for the pipeline (can be constructed by UI from helper methods)
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -87,14 +46,17 @@ pub struct Setup {
     cache_path: PathBuf,
     include_originals: bool,
     extra_bibles: Vec<ExtraBible>,
-    callbacks: Arc<Mutex<Vec<Arc<dyn Fn(Event) + Send + Sync>>>>,
+    callbacks: Arc<Mutex<HashMap<TypeId, Arc<dyn Any>>>>,
     manifest_ttl: Duration,
 }
 
 impl Setup {
-    fn emit(&self, ev: Event) {
-        for cb in self.callbacks.lock().iter() {
-            (cb)(ev.clone());
+    fn emit<E: event::Event>(&self, args: E::Args) {
+        let type_id = TypeId::of::<E>();
+        if let Some(callback) = self.callbacks.lock().get(&type_id) {
+            if let Some(cb) = callback.downcast_ref::<Callback<E::Args>>() {
+                cb(args);
+            }
         }
     }
 
@@ -117,7 +79,7 @@ impl Setup {
         std::fs::create_dir_all(cache_dir)?;
 
         let mut v: Value = if need_download {
-            self.emit(Event::Message("Downloading manifest...".into()));
+            self.emit::<event::Message>("Downloading manifest...".into());
             let text = self
                 .client
                 .get("https://v1.fetch.bible/manifest.json")
@@ -127,7 +89,7 @@ impl Setup {
                 .await?;
             serde_json::from_str(&text)?
         } else {
-            self.emit(Event::Message("Using cached manifest".into()));
+            self.emit::<event::Message>("Using cached manifest".into());
             let bytes = std::fs::read(&manifest_path)?;
             serde_json::from_slice(&bytes)?
         };
@@ -137,10 +99,10 @@ impl Setup {
         // We try to fetch them from their manifest_url and merge; failures are logged as messages but do not abort.
         for extra in &self.extra_bibles {
             let url = &extra.desc_url;
-            self.emit(Event::Message(format!(
-                "Attempting to fetch extra manifest for {} from {}",
-                extra.id, url
-            )));
+            self.emit::<event::Message>(format!(
+                "Attempting to fetch extra manifest for {} from {url}",
+                extra.id
+            ));
             match self.client.get(url).send().await {
                 Ok(resp) if resp.status().is_success() => match resp.text().await {
                     Ok(text) => match serde_json::from_str::<Value>(&text) {
@@ -148,37 +110,37 @@ impl Setup {
                             let new_bible = v.get_mut("bibles").unwrap().as_object_mut().unwrap();
                             if !new_bible.contains_key(&extra.id) {
                                 if new_bible.insert(extra.id.to_string(), extra_val).is_none() {
-                                    self.emit(Event::Message(format!(
+                                    self.emit::<event::Message>(format!(
                                         "Merged extra manifest for {}",
                                         extra.id
-                                    )));
+                                    ));
                                 } else {
-                                    self.emit(Event::Message(format!(
+                                    self.emit::<event::Message>(format!(
                                         "Merged extra manifest for {} failed!",
                                         extra.id
-                                    )));
+                                    ));
                                 }
                             }
                         }
                         Err(e) => {
-                            self.emit(Event::Message(format!(
+                            self.emit::<event::Message>(format!(
                                 "Failed to parse extra manifest for {}: {e}",
                                 extra.id
-                            )));
+                            ));
                         }
                     },
                     Err(e) => {
-                        self.emit(Event::Message(format!(
+                        self.emit::<event::Message>(format!(
                             "Failed to read extra manifest response for {}: {e}",
                             extra.id
-                        )));
+                        ));
                     }
                 },
                 _ => {
-                    self.emit(Event::Message(format!(
+                    self.emit::<event::Message>(format!(
                         "Failed to fetch extra manifest for {} (url: {url}), skipping",
                         extra.id
-                    )));
+                    ));
                 }
             }
         }
@@ -188,10 +150,7 @@ impl Setup {
         std::fs::write(&manifest_path, serialized.as_bytes())?;
 
         // Emit readiness event with merged manifest
-        self.emit(Event::ManifestReady {
-            manifest: v.clone(),
-            path: manifest_path.clone(),
-        });
+        self.emit::<event::ManifestReady>((v.clone(), manifest_path.clone()));
 
         Ok((v, manifest_path))
     }
@@ -263,7 +222,7 @@ impl Setup {
         let path = self.cache_path.join("selection.json");
         let bytes = serde_json::to_vec_pretty(sel)?;
         std::fs::write(&path, &bytes)?;
-        self.emit(Event::SelectionSaved { path: path.clone() });
+        self.emit::<event::SelectionSaved>(path.clone());
         Ok(path)
     }
 
@@ -297,30 +256,20 @@ impl Setup {
                     Ok(resp) if resp.status().is_success() => {
                         let text = resp.text().await?;
                         std::fs::write(&target, text.as_bytes())?;
-                        self.emit(Event::CrossRefCached {
-                            book_id: book_id.clone(),
-                            path: target.clone(),
-                        });
+                        self.emit::<event::CrossRefCached>((book_id.clone(), target.clone()));
                         saved.push(target);
                     }
                     _ => {
-                        self.emit(Event::Message(format!(
+                        self.emit::<event::Message>(format!(
                             "Skipping crossref {book_id} (network failed, no cache)"
-                        )));
+                        ));
                     }
                 }
             } else {
-                self.emit(Event::CrossRefCached {
-                    book_id: book_id.clone(),
-                    path: target.clone(),
-                });
+                self.emit::<event::CrossRefCached>((book_id.clone(), target.clone()));
                 saved.push(target);
             }
-            self.emit(Event::Progress {
-                step: "crossrefs".to_string(),
-                current,
-                total,
-            });
+            self.emit::<event::Progress>(("crossrefs".to_string(), current, total));
         }
         Ok(saved)
     }
@@ -350,34 +299,34 @@ impl Setup {
             // If the manifest param doesn't contain this bible, emit an informative message.
             if let Some(g) = global_bibles_obj {
                 if !g.contains_key(bible_id) {
-                    self.emit(Event::Message(format!(
+                    self.emit::<event::Message>(format!(
                     "Bible id {bible_id} not present in global manifest; treating as external or using provided sources"
-                )));
+                ));
                 }
             }
 
             // First prefer explicit extra_bibles configured via builder
             if let Some(extra) = extra_map.get(bible_id) {
                 // attempt to fetch from provided manifest URL
-                self.emit(Event::Message(format!(
+                self.emit::<event::Message>(format!(
                     "Downloading extra bible manifest for {bible_id} from {}",
                     extra.manifest_url
-                )));
+                ));
                 match self.client.get(&extra.manifest_url).send().await {
                     Ok(resp) if resp.status().is_success() => {
                         let text = resp.text().await?;
                         std::fs::write(&manifest_path, text.as_bytes())?;
                         results.push((bible_id.clone(), manifest_path.clone()));
-                        self.emit(Event::BibleManifestCached {
-                            bible_id: bible_id.clone(),
-                            path: manifest_path.clone(),
-                        });
+                        self.emit::<event::BibleManifestCached>((
+                            bible_id.clone(),
+                            manifest_path.clone(),
+                        ));
                         continue;
                     }
                     _ => {
-                        self.emit(Event::Message(format!(
+                        self.emit::<event::Message>(format!(
                         "Failed to fetch extra manifest for {bible_id}, will try default endpoint or cached file"
-                    )));
+                    ));
                         // fallthrough
                     }
                 }
@@ -396,33 +345,33 @@ impl Setup {
                 .map(|s| s.to_string());
 
             if let Some(url) = manifest_url_from_global {
-                self.emit(Event::Message(format!(
+                self.emit::<event::Message>(format!(
                 "Downloading bible manifest for {bible_id} from manifest URL declared in global manifest: {url}"
-            )));
+            ));
                 match self.client.get(&url).send().await {
                     Ok(resp) if resp.status().is_success() => {
                         let text = resp.text().await?;
                         std::fs::write(&manifest_path, text.as_bytes())?;
                         results.push((bible_id.clone(), manifest_path.clone()));
-                        self.emit(Event::BibleManifestCached {
-                            bible_id: bible_id.clone(),
-                            path: manifest_path.clone(),
-                        });
+                        self.emit::<event::BibleManifestCached>((
+                            bible_id.clone(),
+                            manifest_path.clone(),
+                        ));
                         continue;
                     }
                     _ => {
-                        self.emit(Event::Message(format!(
+                        self.emit::<event::Message>(format!(
                         "Failed to fetch manifest for {bible_id} from declared URL; will try default endpoint or cached file"
-                    )));
+                    ));
                         // fallthrough
                     }
                 }
             }
 
             // default behaviour: attempt to fetch from fetch.bible endpoint
-            self.emit(Event::Message(format!(
+            self.emit::<event::Message>(format!(
                 "Fetching manifest for {bible_id} from fetch.bible"
-            )));
+            ));
             match self
                 .client
                 .get(format!(
@@ -435,25 +384,25 @@ impl Setup {
                     let text = resp.text().await?;
                     std::fs::write(&manifest_path, text.as_bytes())?;
                     results.push((bible_id.clone(), manifest_path.clone()));
-                    self.emit(Event::BibleManifestCached {
-                        bible_id: bible_id.clone(),
-                        path: manifest_path.clone(),
-                    });
+                    self.emit::<event::BibleManifestCached>((
+                        bible_id.clone(),
+                        manifest_path.clone(),
+                    ));
                 }
                 _ => {
                     if manifest_path.exists() {
-                        self.emit(Event::Message(format!(
+                        self.emit::<event::Message>(format!(
                             "Using cached manifest for {bible_id}"
-                        )));
+                        ));
                         results.push((bible_id.clone(), manifest_path.clone()));
-                        self.emit(Event::BibleManifestCached {
-                            bible_id: bible_id.clone(),
-                            path: manifest_path.clone(),
-                        });
+                        self.emit::<event::BibleManifestCached>((
+                            bible_id.clone(),
+                            manifest_path.clone(),
+                        ));
                     } else {
-                        self.emit(Event::Message(format!(
+                        self.emit::<event::Message>(format!(
                             "Failed to fetch manifest for {bible_id} and no cache present"
-                        )));
+                        ));
                     }
                 }
             }
@@ -517,16 +466,16 @@ impl Setup {
                                 let text = resp.text().await?;
                                 std::fs::write(&target, text.as_bytes())?;
                                 out.push((bible_id.clone(), book_id.clone(), target.clone()));
-                                self.emit(Event::BibleBookCached {
-                                    bible_id: bible_id.clone(),
-                                    book_id: book_id.clone(),
-                                    path: target.clone(),
-                                });
+                                self.emit::<event::BibleBookCached>((
+                                    bible_id.clone(),
+                                    book_id.clone(),
+                                    target.clone(),
+                                ));
                             }
                             _ => {
-                                self.emit(Event::Message(format!(
+                                self.emit::<event::Message>(format!(
                                     "Skipped book {book_id} of {bible_id} (fetch failed at template)"
-                                )));
+                                ));
                             }
                         }
                     } else {
@@ -538,32 +487,32 @@ impl Setup {
                                 let text = resp.text().await?;
                                 std::fs::write(&target, text.as_bytes())?;
                                 out.push((bible_id.clone(), book_id.clone(), target.clone()));
-                                self.emit(Event::BibleBookCached {
-                                    bible_id: bible_id.clone(),
-                                    book_id: book_id.clone(),
-                                    path: target.clone(),
-                                });
+                                self.emit::<event::BibleBookCached>((
+                                    bible_id.clone(),
+                                    book_id.clone(),
+                                    target.clone(),
+                                ));
                             }
                             _ => {
-                                self.emit(Event::Message(format!(
+                                self.emit::<event::Message>(format!(
                                     "Skipped book {book_id} of {bible_id} (fetch failed)"
-                                )));
+                                ));
                             }
                         }
                     }
                 } else {
                     out.push((bible_id.clone(), book_id.clone(), target.clone()));
-                    self.emit(Event::BibleBookCached {
-                        bible_id: bible_id.clone(),
-                        book_id: book_id.clone(),
-                        path: target.clone(),
-                    });
+                    self.emit::<event::BibleBookCached>((
+                        bible_id.clone(),
+                        book_id.clone(),
+                        target.clone(),
+                    ));
                 }
-                self.emit(Event::Progress {
-                    step: format!("download_books_{bible_id}"),
+                self.emit::<event::Progress>((
+                    format!("download_books_{bible_id}"),
                     current,
                     total,
-                });
+                ));
             }
         }
         Ok(out)
@@ -582,7 +531,7 @@ impl Setup {
         self.save_selection(&selection)?;
 
         // Cache crossrefs
-        self.emit(Event::Message("Starting crossref caching".into()));
+        self.emit::<event::Message>("Starting crossref caching".into());
         let cross_paths = self.cache_crossrefs(&manifest).await?;
         // parse crossrefs and call sink
         for path in cross_paths {
@@ -596,24 +545,22 @@ impl Setup {
                 // consumer decides how to insert the structure
                 sink.insert_cross_reference(&book_id, &parsed).await?;
             } else {
-                self.emit(Event::Message(
-                    format!("Failed to parse crossref {path:?}",),
-                ));
+                self.emit::<event::Message>(format!("Failed to parse crossref {path:?}"));
             }
         }
 
         // Cache bible manifests
-        self.emit(Event::Message("Starting bible manifests caching".into()));
+        self.emit::<event::Message>("Starting bible manifests caching".into());
         let manifests = self
             .cache_bible_manifests(&manifest, &selection.bibles)
             .await?;
 
         // Cache bible books
-        self.emit(Event::Message("Starting bible books caching".into()));
+        self.emit::<event::Message>("Starting bible books caching".into());
         let book_files = self.cache_bible_books(&manifests).await?;
 
         // Insert languages
-        self.emit(Event::Message("Inserting languages via DbSink".into()));
+        self.emit::<event::Message>("Inserting languages via DbSink".into());
         for lang in &selection.languages {
             if let Some(lang_obj) = manifest.get("languages").and_then(|v| v.get(lang)) {
                 let direction = lang_obj
@@ -719,10 +666,10 @@ impl Setup {
                         }
                     }
                 } else {
-                    self.emit(Event::Message(format!(
+                    self.emit::<event::Message>(format!(
                         "Failed to parse book file {}",
                         path.display()
-                    )));
+                    ));
                 }
             }
         }
@@ -730,7 +677,7 @@ impl Setup {
         // finalize sink (commit or vacuum etc)
         sink.finalize().await?;
 
-        self.emit(Event::Completed);
+        self.emit::<event::Completed>(());
         Ok(())
     }
 }
