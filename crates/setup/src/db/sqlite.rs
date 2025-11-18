@@ -1,5 +1,10 @@
+use std::path::PathBuf;
+
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use service_db::{Connection, Crud, DbBible, DbBook, DbCrossReference, DbHeader, DbLanguage, DbVerse, DbVerseNote, Sqlite};
+use service_db::{
+    Connection, Crud, DbBible, DbBook, DbCrossReference, DbHeader, DbLanguage, DbVerse,
+    DbVerseNote, Sqlite,
+};
 
 use crate::{CrossReference, Reference, Result};
 
@@ -21,12 +26,16 @@ impl From<String> for SqliteDbSink {
     }
 }
 
+impl From<PathBuf> for SqliteDbSink {
+    fn from(db_path: PathBuf) -> Self {
+        let db = Sqlite::new(db_path).unwrap();
+        let conn = db.connection();
+        Self { conn }
+    }
+}
+
 impl DbSink for SqliteDbSink {
-    async fn insert_cross_reference(
-        &self,
-        book: &str,
-        data: &CrossReference,
-    ) -> Result<()> {
+    async fn insert_cross_reference(&self, book: &str, data: &CrossReference) -> Result<()> {
         data.par_iter().for_each(|(source_chapter, cross)| {
             cross.par_iter().for_each(|(source_verse, cross)| {
                 let mut targets = 0;
