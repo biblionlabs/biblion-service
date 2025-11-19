@@ -7,17 +7,13 @@ pub use sqlite::*;
 
 /// Trait that consumers implement to receive parsed data and insert to DB.
 ///
-/// Methods are async so sinking can perform DB I/O concurrently.
+/// Methods are so sinking can perform DB I/O concurrently.
 pub trait DbSink: Send + Sync {
-    async fn insert_cross_reference(
-        &self,
-        _book: &str,
-        _data: &models::CrossReference,
-    ) -> Result<()> {
+    fn insert_cross_reference(&self, _book: &str, _data: &models::CrossReference) -> Result<()> {
         Ok(())
     }
 
-    async fn insert_language(
+    fn insert_language(
         &self,
         _lang_id: &str,
         _direction: &str,
@@ -27,7 +23,7 @@ pub trait DbSink: Send + Sync {
         Ok(())
     }
 
-    async fn insert_bible(
+    fn insert_bible(
         &self,
         _bible_id: &str,
         _name_local: &str,
@@ -37,7 +33,7 @@ pub trait DbSink: Send + Sync {
         Ok(())
     }
 
-    async fn insert_header(
+    fn insert_header(
         &self,
         _bible_id: &str,
         _book_id: &str,
@@ -47,7 +43,7 @@ pub trait DbSink: Send + Sync {
         Ok(())
     }
 
-    async fn insert_book_meta(
+    fn insert_book_meta(
         &self,
         _bible_id: &str,
         _book_id: &str,
@@ -58,7 +54,7 @@ pub trait DbSink: Send + Sync {
         Ok(())
     }
 
-    async fn insert_verse(
+    fn insert_verse(
         &self,
         _book_id: &str,
         _chapter: usize,
@@ -68,7 +64,7 @@ pub trait DbSink: Send + Sync {
         Ok(())
     }
 
-    async fn insert_note(
+    fn insert_note(
         &self,
         _book_id: &str,
         _chapter: usize,
@@ -78,7 +74,7 @@ pub trait DbSink: Send + Sync {
         Ok(())
     }
 
-    async fn finalize(&self) -> Result<()> {
+    fn finalize(&self) -> Result<()> {
         Ok(())
     }
 }

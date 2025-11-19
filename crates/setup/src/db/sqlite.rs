@@ -35,7 +35,7 @@ impl From<PathBuf> for SqliteDbSink {
 }
 
 impl DbSink for SqliteDbSink {
-    async fn insert_cross_reference(&self, book: &str, data: &CrossReference) -> Result<()> {
+    fn insert_cross_reference(&self, book: &str, data: &CrossReference) -> Result<()> {
         data.par_iter().for_each(|(source_chapter, cross)| {
             cross.par_iter().for_each(|(source_verse, cross)| {
                 let mut targets = 0;
@@ -78,7 +78,7 @@ impl DbSink for SqliteDbSink {
         Ok(())
     }
 
-    async fn insert_language(
+    fn insert_language(
         &self,
         lang_id: &str,
         direction: &str,
@@ -95,7 +95,7 @@ impl DbSink for SqliteDbSink {
         Ok(())
     }
 
-    async fn insert_bible(
+    fn insert_bible(
         &self,
         bible_id: &str,
         name_local: &str,
@@ -112,7 +112,7 @@ impl DbSink for SqliteDbSink {
         Ok(())
     }
 
-    async fn insert_header(
+    fn insert_header(
         &self,
         bible_id: &str,
         book_id: &str,
@@ -130,7 +130,7 @@ impl DbSink for SqliteDbSink {
         Ok(())
     }
 
-    async fn insert_book_meta(
+    fn insert_book_meta(
         &self,
         bible_id: &str,
         book_id: &str,
@@ -149,13 +149,7 @@ impl DbSink for SqliteDbSink {
         Ok(())
     }
 
-    async fn insert_verse(
-        &self,
-        book_id: &str,
-        chapter: usize,
-        verse: usize,
-        text: &str,
-    ) -> Result<()> {
+    fn insert_verse(&self, book_id: &str, chapter: usize, verse: usize, text: &str) -> Result<()> {
         let data = DbVerse {
             id: 0,
             book_id: book_id.to_string(),
@@ -167,13 +161,7 @@ impl DbSink for SqliteDbSink {
         Ok(())
     }
 
-    async fn insert_note(
-        &self,
-        book_id: &str,
-        chapter: usize,
-        verse: usize,
-        text: &str,
-    ) -> Result<()> {
+    fn insert_note(&self, book_id: &str, chapter: usize, verse: usize, text: &str) -> Result<()> {
         let data = DbVerseNote {
             id: 0,
             book_id: book_id.to_string(),
@@ -185,7 +173,7 @@ impl DbSink for SqliteDbSink {
         Ok(())
     }
 
-    async fn finalize(&self) -> Result<()> {
+    fn finalize(&self) -> Result<()> {
         // any final steps like rebuilding indices
         Ok(())
     }

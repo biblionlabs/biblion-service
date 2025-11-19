@@ -16,8 +16,7 @@ use inquire::{Confirm, MultiSelect};
 
 use setup_core::{Selection, SetupBuilder, SqliteDbSink, event};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=======================================");
     println!("     Welcome to Bible Setup CLI (with DbSink)");
     println!("=======================================\n");
@@ -180,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
 
     // Example: fetch lists for UI prompts
-    let languages = setup.list_languages().await?;
+    let languages = setup.list_languages()?;
     let language_options = languages
         .iter()
         .enumerate()
@@ -200,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .prompt()?;
 
     // list bibles
-    let bibles = setup.list_bibles().await?;
+    let bibles = setup.list_bibles()?;
     let bible_options = bibles
         .iter()
         .enumerate()
@@ -339,7 +338,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create DB sink and run the orchestrator
     let sink = SqliteDbSink::from("bible.db".to_string());
-    setup.run_with_sink(selection, sink).await.map_err(|e| {
+    setup.run_with_sink(selection, &sink).map_err(|e| {
         println!("Setup failed: {e}");
         e
     })?;

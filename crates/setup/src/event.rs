@@ -11,6 +11,8 @@ macro_rules! gen_event {
     ($($n:ident),* $(,)?) => {
         $(
             pub struct $n;
+            unsafe impl Send for $n {}
+            unsafe impl Sync for $n {}
             impl Event for $n {
                 type Args = ();
             }
@@ -22,6 +24,8 @@ macro_rules! gen_event {
         $(
             #[doc = concat!(" ", stringify!($a), ": ", stringify!($ty))]
             pub struct $n;
+            unsafe impl Send for $n {}
+            unsafe impl Sync for $n {}
             impl Event for $n {
                 type Args = $ty;
             }
@@ -33,6 +37,8 @@ macro_rules! gen_event {
         $(
             #[doc = concat!(" ", stringify!($a), ": ", stringify!($ty))]
             pub struct $n;
+            unsafe impl Send for $n {}
+            unsafe impl Sync for $n {}
             impl Event for $n {
                 type Args = $ty;
             }
@@ -45,6 +51,8 @@ macro_rules! gen_event {
             #[doc = concat!(" ", stringify!($first_a), ": ", stringify!($first_ty),)]
             $(#[doc = concat!(" ", stringify!($a), ": ", stringify!($ty))])*
             pub struct $n;
+            unsafe impl Send for $n {}
+            unsafe impl Sync for $n {}
             impl Event for $n {
                 type Args = ($first_ty, $($ty,)*);
             }

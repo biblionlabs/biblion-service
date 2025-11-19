@@ -7,8 +7,7 @@
 
 #![warn(async_fn_in_trait)]
 
-use parking_lot::Mutex;
-use reqwest::Client;
+use reqwest::blocking::Client;
 use serde_json::Value;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -61,7 +60,7 @@ impl Setup {
     }
 
     /// returns manifest Value and path
-    pub async fn load_manifest(&self) -> Result<(Value, PathBuf)> {
+    pub fn load_manifest(&self) -> Result<(Value, PathBuf)> {
         let cache_dir = &self.cache_path;
         let manifest_path = cache_dir.join("manifest.json");
         let need_download = if manifest_path.exists() {
@@ -83,10 +82,8 @@ impl Setup {
             let text = self
                 .client
                 .get("https://v1.fetch.bible/manifest.json")
-                .send()
-                .await?
-                .text()
-                .await?;
+                .send()?
+                .text()?;
             serde_json::from_str(&text)?
         } else {
             self.emit::<event::Message>("Using cached manifest".into());
@@ -103,8 +100,8 @@ impl Setup {
                 "Attempting to fetch extra manifest for {} from {url}",
                 extra.id
             ));
-            match self.client.get(url).send().await {
-                Ok(resp) if resp.status().is_success() => match resp.text().await {
+            match self.client.get(url).send() {
+                Ok(resp) if resp.status().is_success() => match resp.text() {
                     Ok(text) => match serde_json::from_str::<Value>(&text) {
                         Ok(extra_val) => {
                             let new_bible = v.get_mut("bibles").unwrap().as_object_mut().unwrap();
@@ -156,8 +153,8 @@ impl Setup {
     }
 
     /// helpers for UI: list languages (code, english, local)
-    pub async fn list_languages(&self) -> Result<Vec<(String, String, String)>> {
-        let (manifest, _) = self.load_manifest().await?;
+    pub fn list_languages(&self) -> Result<Vec<(String, String, String)>> {
+        let (manifest, _) = self.load_manifest()?;
         let languages_obj = manifest
             .get("languages")
             .and_then(|v| v.as_object())
@@ -183,8 +180,8 @@ impl Setup {
     }
 
     /// helpers for UI: list bibles (id, local, english, language)
-    pub async fn list_bibles(&self) -> Result<Vec<(String, String, String, String)>> {
-        let (manifest, _) = self.load_manifest().await?;
+    pub fn list_bibles(&self) -> Result<Vec<(String, String, String, String)>> {
+        let (manifest, _) = self.load_manifest()?;
         let bibles_obj = manifest
             .get("bibles")
             .and_then(|v| v.as_object())
@@ -226,8 +223,14 @@ impl Setup {
         Ok(path)
     }
 
+    /// Verify if bible is installed
+    pub fn is_bible_installed(&self, bible_id: &str) -> bool {
+        let path = self.cache_path.join("bibles").join(bible_id);
+        path.exists() && path.is_dir() && path.read_dir().is_ok_and(|p| p.count() > 0)
+    }
+
     /// cache crossrefs (returns paths)
-    pub async fn cache_crossrefs(&self, manifest: &Value) -> Result<Vec<PathBuf>> {
+    pub fn cache_crossrefs(&self, manifest: &Value) -> Result<Vec<PathBuf>> {
         let cache_dir = self.cache_path.join("cross");
         std::fs::create_dir_all(&cache_dir)?;
         let mut saved = Vec::new();
@@ -251,10 +254,9 @@ impl Setup {
                         "https://v1.fetch.bible/crossref/large/{book_id}.json"
                     ))
                     .send()
-                    .await
                 {
                     Ok(resp) if resp.status().is_success() => {
-                        let text = resp.text().await?;
+                        let text = resp.text()?;
                         std::fs::write(&target, text.as_bytes())?;
                         self.emit::<event::CrossRefCached>((book_id.clone(), target.clone()));
                         saved.push(target);
@@ -276,7 +278,7 @@ impl Setup {
 
     /// Cache bible manifests (including extra manifests provided via extra_bibles)
     /// returns Vec<(bible_id, manifest_path)>
-    pub async fn cache_bible_manifests(
+    pub fn cache_bible_manifests(
         &self,
         manifest: &Value,
         bible_ids: &[String],
@@ -312,9 +314,9 @@ impl Setup {
                     "Downloading extra bible manifest for {bible_id} from {}",
                     extra.manifest_url
                 ));
-                match self.client.get(&extra.manifest_url).send().await {
+                match self.client.get(&extra.manifest_url).send() {
                     Ok(resp) if resp.status().is_success() => {
-                        let text = resp.text().await?;
+                        let text = resp.text()?;
                         std::fs::write(&manifest_path, text.as_bytes())?;
                         results.push((bible_id.clone(), manifest_path.clone()));
                         self.emit::<event::BibleManifestCached>((
@@ -348,9 +350,9 @@ impl Setup {
                 self.emit::<event::Message>(format!(
                 "Downloading bible manifest for {bible_id} from manifest URL declared in global manifest: {url}"
             ));
-                match self.client.get(&url).send().await {
+                match self.client.get(&url).send() {
                     Ok(resp) if resp.status().is_success() => {
-                        let text = resp.text().await?;
+                        let text = resp.text()?;
                         std::fs::write(&manifest_path, text.as_bytes())?;
                         results.push((bible_id.clone(), manifest_path.clone()));
                         self.emit::<event::BibleManifestCached>((
@@ -378,10 +380,9 @@ impl Setup {
                     "https://v1.fetch.bible/bibles/{bible_id}/extra.json"
                 ))
                 .send()
-                .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    let text = resp.text().await?;
+                    let text = resp.text()?;
                     std::fs::write(&manifest_path, text.as_bytes())?;
                     results.push((bible_id.clone(), manifest_path.clone()));
                     self.emit::<event::BibleManifestCached>((
@@ -412,7 +413,7 @@ impl Setup {
 
     /// Cache books for bibles; uses manifest to find book ids, and falls back to extra book_url_template when manifest doesn't provide file content.
     /// returns tuples (bible_id, book_id, path)
-    pub async fn cache_bible_books(
+    pub fn cache_bible_books(
         &self,
         manifests: &[(String, PathBuf)],
     ) -> Result<Vec<(String, String, PathBuf)>> {
@@ -461,9 +462,9 @@ impl Setup {
                         let url = template
                             .replace("{bible_id}", bible_id)
                             .replace("{book}", &book_id);
-                        match self.client.get(&url).send().await {
+                        match self.client.get(&url).send() {
                             Ok(resp) if resp.status().is_success() => {
-                                let text = resp.text().await?;
+                                let text = resp.text()?;
                                 std::fs::write(&target, text.as_bytes())?;
                                 out.push((bible_id.clone(), book_id.clone(), target.clone()));
                                 self.emit::<event::BibleBookCached>((
@@ -482,9 +483,9 @@ impl Setup {
                         // fallback to fetch.bible default endpoint
                         let url =
                             format!("https://v1.fetch.bible/bibles/{bible_id}/txt/{book_id}.json");
-                        match self.client.get(&url).send().await {
+                        match self.client.get(&url).send() {
                             Ok(resp) if resp.status().is_success() => {
-                                let text = resp.text().await?;
+                                let text = resp.text()?;
                                 std::fs::write(&target, text.as_bytes())?;
                                 out.push((bible_id.clone(), book_id.clone(), target.clone()));
                                 self.emit::<event::BibleBookCached>((
@@ -508,31 +509,19 @@ impl Setup {
                         target.clone(),
                     ));
                 }
-                self.emit::<event::Progress>((
-                    format!("download_books_{bible_id}"),
-                    current,
-                    total,
-                ));
+                self.emit::<event::Progress>((bible_id.clone(), current, total));
             }
         }
         Ok(out)
     }
 
-    /// Full run that pipes parsed data to a DbSink so the orchestrator itself can build the DB.
-    /// This will:
-    ///  - load manifest
-    ///  - cache crossrefs, bible manifests, books
-    ///  - parse and call DbSink hooks to insert crossrefs, languages, bibles, headers, books, verses
-    pub async fn run_with_sink(&self, selection: Selection, sink: impl DbSink) -> Result<()> {
+    pub fn install_cross(&self, sink: &impl DbSink) -> Result<()> {
         // Load manifest
-        let (manifest, _manifest_path) = self.load_manifest().await?;
-
-        // Save selection
-        self.save_selection(&selection)?;
+        let (manifest, _manifest_path) = self.load_manifest()?;
 
         // Cache crossrefs
         self.emit::<event::Message>("Starting crossref caching".into());
-        let cross_paths = self.cache_crossrefs(&manifest).await?;
+        let cross_paths = self.cache_crossrefs(&manifest)?;
         // parse crossrefs and call sink
         for path in cross_paths {
             let book_id = path
@@ -543,41 +532,26 @@ impl Setup {
             let text = std::fs::read_to_string(&path)?;
             if let Ok(parsed) = serde_json::from_str::<models::CrossReference>(&text) {
                 // consumer decides how to insert the structure
-                sink.insert_cross_reference(&book_id, &parsed).await?;
+                sink.insert_cross_reference(&book_id, &parsed)?;
             } else {
                 self.emit::<event::Message>(format!("Failed to parse crossref {path:?}"));
             }
         }
 
+        Ok(())
+    }
+
+    pub fn install_bibles(&self, sink: &impl DbSink, bible_ids: &[String]) -> Result<()> {
+        // Load manifest
+        let (manifest, _manifest_path) = self.load_manifest()?;
+
         // Cache bible manifests
         self.emit::<event::Message>("Starting bible manifests caching".into());
-        let manifests = self
-            .cache_bible_manifests(&manifest, &selection.bibles)
-            .await?;
+        let manifests = self.cache_bible_manifests(&manifest, bible_ids)?;
 
         // Cache bible books
         self.emit::<event::Message>("Starting bible books caching".into());
-        let book_files = self.cache_bible_books(&manifests).await?;
-
-        // Insert languages
-        self.emit::<event::Message>("Inserting languages via DbSink".into());
-        for lang in &selection.languages {
-            if let Some(lang_obj) = manifest.get("languages").and_then(|v| v.get(lang)) {
-                let direction = lang_obj
-                    .get("direction")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("ltr");
-                let local = lang_obj.get("local").and_then(|v| v.as_str()).unwrap_or("");
-                let english = lang_obj
-                    .get("english")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                sink.insert_language(lang, direction, local, english)
-                    .await?;
-            } else {
-                sink.insert_language(lang, "ltr", "", "").await?;
-            }
-        }
+        let book_files = self.cache_bible_books(&manifests)?;
 
         // For each bible, call insert_bible, insert headers, insert book metadata and verses
         for (bible_id, manifest_path) in &manifests {
@@ -609,8 +583,7 @@ impl Setup {
                 ("".into(), "".into(), "".into())
             };
 
-            sink.insert_bible(bible_id, &name_local, &name_english, &language_id)
-                .await?;
+            sink.insert_bible(bible_id, &name_local, &name_english, &language_id)?;
 
             // parse local bible manifest for chapter_headings
             let text = std::fs::read_to_string(manifest_path)?;
@@ -621,13 +594,13 @@ impl Setup {
                         if header.is_empty() {
                             continue;
                         }
-                        sink.insert_header(bible_id, book, i, header).await?;
+                        sink.insert_header(bible_id, book, i, header)?;
                     }
                 }
             }
 
             // insert books/verses for this bible by scanning book_files
-            for (bb_id, book_id, path) in book_files.iter().filter(|t| &t.0 == bible_id) {
+            for (_bb_id, book_id, path) in book_files.iter().filter(|t| &t.0 == bible_id) {
                 let data = std::fs::read_to_string(path)?;
                 if let Ok(book_obj) = serde_json::from_str::<models::Book>(&data) {
                     // insert book meta
@@ -637,8 +610,7 @@ impl Setup {
                         &book_obj.name.normal,
                         &book_obj.name.long,
                         &book_obj.name.abbrev,
-                    )
-                    .await?;
+                    )?;
                     // iterate contents: contents[chapter][verse] -> Vec<Content>
                     for (chapter_idx, chapter) in book_obj.contents.iter().enumerate() {
                         for (verse_idx, verse_contents) in chapter.iter().enumerate() {
@@ -647,8 +619,7 @@ impl Setup {
                             for c in verse_contents {
                                 match c {
                                     models::Content::Raw(s) => {
-                                        sink.insert_verse(&book_id, chapter_idx, verse_idx, s)
-                                            .await?;
+                                        sink.insert_verse(&book_id, chapter_idx, verse_idx, s)?;
                                     }
                                     models::Content::Note { contents, .. } => {
                                         // Optionally insert notes as verses or separate table; keep it as verse insertion for demo
@@ -657,8 +628,7 @@ impl Setup {
                                             chapter_idx,
                                             verse_idx,
                                             contents,
-                                        )
-                                        .await?;
+                                        )?;
                                     }
                                     _ => {}
                                 }
@@ -674,8 +644,50 @@ impl Setup {
             }
         }
 
+        Ok(())
+    }
+
+    pub fn install_langs(&self, sink: &impl DbSink, languages: &[String]) -> Result<()> {
+        // Load manifest
+        let (manifest, _manifest_path) = self.load_manifest()?;
+
+        // Insert languages
+        self.emit::<event::Message>("Inserting languages via DbSink".into());
+        for lang in languages {
+            if let Some(lang_obj) = manifest.get("languages").and_then(|v| v.get(lang)) {
+                let direction = lang_obj
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ltr");
+                let local = lang_obj.get("local").and_then(|v| v.as_str()).unwrap_or("");
+                let english = lang_obj
+                    .get("english")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                sink.insert_language(lang, direction, local, english)?;
+            } else {
+                sink.insert_language(lang, "ltr", "", "")?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Full run that pipes parsed data to a DbSink so the orchestrator itself can build the DB.
+    /// This will:
+    ///  - load manifest
+    ///  - cache crossrefs, bible manifests, books
+    ///  - parse and call DbSink hooks to insert crossrefs, languages, bibles, headers, books, verses
+    pub fn run_with_sink(&self, selection: Selection, sink: &impl DbSink) -> Result<()> {
+        // Save selection
+        self.save_selection(&selection)?;
+
+        self.install_cross(sink)?;
+        self.install_langs(sink, &selection.languages)?;
+        self.install_bibles(sink, &selection.bibles)?;
+
         // finalize sink (commit or vacuum etc)
-        sink.finalize().await?;
+        sink.finalize()?;
 
         self.emit::<event::Completed>(());
         Ok(())
