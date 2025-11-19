@@ -4,11 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
-use reqwest::{Client, ClientBuilder};
+use reqwest::blocking::{Client, ClientBuilder};
 
-use crate::Setup;
 use crate::event::Event;
+use crate::{Callback, Setup};
 
 /// When adding an "extra bible" we can specify manifest_url and optionally a template
 /// for book URLs. The template can include {bible_id} and {book} placeholders, e.g.
@@ -27,7 +26,7 @@ pub struct SetupBuilder {
     cache_path: PathBuf,
     include_originals: bool,
     extra_bibles: Vec<ExtraBible>,
-    callbacks: HashMap<TypeId, Arc<dyn Any>>,
+    callbacks: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     manifest_ttl: Duration,
 }
 
@@ -87,7 +86,8 @@ impl SetupBuilder {
 
     pub fn on<E: Event>(mut self, callback: impl Fn(E::Args) + Send + Sync + 'static) -> Self {
         let type_id = TypeId::of::<E>();
-        self.callbacks.insert(type_id, Arc::new(callback));
+        let boxed: Callback<E::Args> = Box::new(callback);
+        self.callbacks.insert(type_id, Box::new(boxed));
         self
     }
 
@@ -100,7 +100,7 @@ impl SetupBuilder {
                 cache_path: self.cache_path,
                 include_originals: self.include_originals,
                 extra_bibles: self.extra_bibles,
-                callbacks: Arc::new(Mutex::new(self.callbacks)),
+                callbacks: Arc::new(self.callbacks),
                 manifest_ttl: self.manifest_ttl,
             },
         )

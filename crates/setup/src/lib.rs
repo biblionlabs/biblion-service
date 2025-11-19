@@ -27,7 +27,7 @@ pub use db::*;
 pub use error::{Result, Setup as Error};
 pub use models::*;
 
-pub type Callback<Args> = Arc<dyn Fn(Args) + Send + Sync>;
+pub type Callback<Args> = Box<dyn Fn(Args) + Send + Sync>;
 
 /// Selection struct for the pipeline (can be constructed by UI from helper methods)
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -45,18 +45,20 @@ pub struct Setup {
     cache_path: PathBuf,
     include_originals: bool,
     extra_bibles: Vec<ExtraBible>,
-    callbacks: Arc<Mutex<HashMap<TypeId, Arc<dyn Any>>>>,
+    callbacks: Arc<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
     manifest_ttl: Duration,
 }
 
 impl Setup {
     fn emit<E: event::Event>(&self, args: E::Args) {
         let type_id = TypeId::of::<E>();
-        if let Some(callback) = self.callbacks.lock().get(&type_id) {
-            if let Some(cb) = callback.downcast_ref::<Callback<E::Args>>() {
-                cb(args);
-            }
-        }
+        let Some(callback) = self.callbacks.get(&type_id) else {
+            return;
+        };
+        let Some(cb) = callback.downcast_ref::<Callback<E::Args>>() else {
+            return;
+        };
+        cb(args);
     }
 
     /// returns manifest Value and path
