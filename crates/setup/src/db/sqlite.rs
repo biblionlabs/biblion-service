@@ -15,7 +15,7 @@ use super::DbSink;
 pub struct SqliteDbSink {
     // here we could keep a connection pool, etc.
     // For demo purposes we'll open a new connection for each operation (not optimal).
-    conn: Connection,
+    pub conn: Connection,
 }
 
 impl From<String> for SqliteDbSink {

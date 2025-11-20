@@ -5,6 +5,10 @@ use crate::{Crud, FromRow, Queriable};
 
 use common::Verse;
 
+mod search;
+
+pub use search::*;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbVerse {
     pub id: i64,

@@ -20,6 +20,7 @@ mod db;
 mod error;
 mod models;
 
+pub use service_db;
 pub mod event;
 
 pub use builder::*;
@@ -452,7 +453,7 @@ impl Setup {
             let books_dir = bible_dir.join("books");
             std::fs::create_dir_all(&books_dir)?;
 
-            let total = books.len() as u64;
+            let total = (books.len() + 1) as u64;
             let mut current = 0u64;
             for book_id in books {
                 current += 1;
@@ -578,7 +579,8 @@ impl Setup {
                 let language = g
                     .get("language")
                     .and_then(|s| s.as_str())
-                    .unwrap_or("")
+                    .or(bible_id.split("_").next())
+                    .unwrap_or_default()
                     .to_string();
                 (local, english, language)
             } else {
@@ -590,8 +592,11 @@ impl Setup {
             // parse local bible manifest for chapter_headings
             let text = std::fs::read_to_string(manifest_path)?;
             if let Ok(bv) = serde_json::from_str::<models::BibleVariant>(&text) {
+                let total = (bv.chapter_headings.len() + 1) as u64;
+                let mut current = 0u64;
                 // chapter headings
                 for (book, chs) in bv.chapter_headings.iter() {
+                    current += 1;
                     for (i, header) in chs.iter().enumerate() {
                         if header.is_empty() {
                             continue;
@@ -599,10 +604,19 @@ impl Setup {
                         sink.insert_header(bible_id, book, i, header)?;
                     }
                 }
+                self.emit::<event::Progress>((bible_id.clone(), current, total));
             }
 
+            let mut current = 0u64;
+            let books = book_files
+                .iter()
+                .filter(|t| &t.0 == bible_id)
+                .collect::<Vec<_>>();
+            let total = books.len() as u64;
+
             // insert books/verses for this bible by scanning book_files
-            for (_bb_id, book_id, path) in book_files.iter().filter(|t| &t.0 == bible_id) {
+            for (_bb_id, book_id, path) in books {
+                current += 1;
                 let data = std::fs::read_to_string(path)?;
                 if let Ok(book_obj) = serde_json::from_str::<models::Book>(&data) {
                     // insert book meta
@@ -613,8 +627,11 @@ impl Setup {
                         &book_obj.name.long,
                         &book_obj.name.abbrev,
                     )?;
+                    let mut current = 0u64;
+                    let total = book_obj.contents.len() as u64;
                     // iterate contents: contents[chapter][verse] -> Vec<Content>
                     for (chapter_idx, chapter) in book_obj.contents.iter().enumerate() {
+                        current += 1;
                         for (verse_idx, verse_contents) in chapter.iter().enumerate() {
                             // combine Raw content segments into a simple text for DB insertion
                             // original code inserted notes as separate rows; here we only insert plain verse text for simplicity
@@ -636,14 +653,18 @@ impl Setup {
                                 }
                             }
                         }
+                        self.emit::<event::Progress>((bible_id.clone(), current, total));
                     }
+                    self.emit::<event::Progress>((bible_id.clone(), current, total));
                 } else {
                     self.emit::<event::Message>(format!(
                         "Failed to parse book file {}",
                         path.display()
                     ));
                 }
+                self.emit::<event::Progress>((bible_id.clone(), current, total));
             }
+            self.emit::<event::Progress>((bible_id.clone(), current, total));
         }
 
         Ok(())
