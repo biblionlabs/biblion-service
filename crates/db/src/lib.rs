@@ -1,11 +1,12 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{Connection as SQLiteConnection, Params, Result, Row, ToSql, params_from_iter};
+use rusqlite::{Connection as SQLiteConnection, Params, Row, ToSql, params_from_iter};
 
 mod bible;
 mod book;
 mod cross;
+mod error;
 mod header;
 mod lang;
 mod notes;
@@ -14,10 +15,13 @@ mod verse;
 pub use bible::*;
 pub use book::*;
 pub use cross::*;
+pub use error::{DB as Error, Result};
 pub use header::*;
 pub use lang::*;
 pub use notes::*;
 pub use verse::*;
+
+pub use rusqlite::{Error as SqliteError, Result as SqliteResult};
 
 pub type Connection = Arc<Mutex<SQLiteConnection>>;
 
@@ -35,7 +39,7 @@ pub trait Migrate {
 }
 
 pub trait FromRow: Sized {
-    fn from_row(row: &Row) -> Result<Self>;
+    fn from_row(row: &Row) -> rusqlite::Result<Self>;
 }
 
 pub trait ToParams {
@@ -63,7 +67,7 @@ pub trait Crud: Queriable + FromRow + Send + Sync + Sized {
             .execute(&sql, params_from_iter(self.insert_params()));
         if let Err(e) = res {
             println!("SQL: {sql}");
-            return Err(e);
+            return Err(e.into());
         }
         Ok(())
     }
@@ -88,7 +92,7 @@ pub trait Crud: Queriable + FromRow + Send + Sync + Sized {
             .execute(&sql, params_from_iter(self.params()));
         if let Err(e) = res {
             println!("SQL: {sql}");
-            return Err(e);
+            return Err(e.into());
         }
         Ok(())
     }
@@ -126,7 +130,10 @@ pub trait Crud: Queriable + FromRow + Send + Sync + Sized {
         let sql = format!("SELECT {} FROM {}", Self::field_list(), Self::TABLE);
         let binding = { conn.lock().unwrap() };
         let mut stmt = binding.prepare(&sql)?;
-        Ok(stmt.query_map([], Self::from_row)?.collect::<Result<_>>()?)
+        Ok(stmt
+            .query_map([], Self::from_row)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Error::from)?)
     }
 
     fn select_where<'a>(
@@ -145,7 +152,8 @@ pub trait Crud: Queriable + FromRow + Send + Sync + Sized {
         let mut stmt = binding.prepare(&sql)?;
         Ok(stmt
             .query_map(params_from_iter(value), Self::from_row)?
-            .collect::<Result<_>>()?)
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Error::from)?)
     }
 
     fn insert_params<'a>(&'a self) -> Vec<&'a dyn ToSql> {
@@ -190,6 +198,7 @@ pub trait Joinable<A: Queriable + FromRow, B: Queriable + FromRow> {
 
 pub struct Sqlite {
     conn: Connection,
+    index: Arc<Option<VerseIndex>>,
 }
 
 impl Migrate for Sqlite {
@@ -257,15 +266,25 @@ CREATE INDEX IF NOT EXISTS idx_cross_source ON cross_references(source_book, sou
 CREATE INDEX IF NOT EXISTS idx_cross_target ON cross_references(target_book, target_chapter, target_verse);
 COMMIT;
 "#;
-        self.conn.lock().unwrap().execute_batch(&sql)
+        self.conn.lock().unwrap().execute_batch(&sql)?;
+        Ok(())
     }
 }
 
 impl Sqlite {
     pub fn new(db: impl AsRef<Path>) -> Result<Self> {
-        let conn = rusqlite::Connection::open(db)?;
+        let conn = rusqlite::Connection::open(&db)?;
         let conn = Arc::new(Mutex::new(conn));
-        let db = Self { conn };
+
+        let db_path = db.as_ref();
+        let index_path = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("index");
+
+        let index = Arc::new(VerseIndex::new(index_path).ok());
+
+        let db = Self { conn, index };
 
         db.migrate()?;
 
@@ -274,5 +293,9 @@ impl Sqlite {
 
     pub fn connection(&self) -> Connection {
         self.conn.clone()
+    }
+
+    pub fn verse_index(&self) -> Arc<Option<VerseIndex>> {
+        self.index.clone()
     }
 }

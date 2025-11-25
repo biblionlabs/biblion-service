@@ -11,3 +11,4 @@ deunicode = "1.6.2"
 regex = "1.12.2"
 rusqlite = "0.37.0"
 serde.workspace = true
+tantivy = "0.25.0"

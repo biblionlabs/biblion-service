@@ -21,6 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("     Welcome to Bible Setup CLI (with DbSink)");
     println!("=======================================\n");
 
+    // Create DB sink and run the orchestrator
+    let sink = SqliteDbSink::from("bible.db".to_string());
     let mp = Arc::new(MultiProgress::new());
     let bars: Arc<Mutex<HashMap<String, ProgressBar>>> = Arc::new(Mutex::new(HashMap::new()));
 
@@ -199,18 +201,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .prompt()?;
 
     // list bibles
-    let bibles = setup.list_bibles()?;
+    let bibles = setup.list_bibles(&sink)?;
     let bible_options = bibles
         .iter()
         .enumerate()
-        .map(|(i, (_, local, english, _))| {
+        .map(|(i, (_, local, english, _, status))| {
             ListOption::new(
                 i,
                 format!(
-                    "{} ({})",
+                    "{} ({}) {status}",
                     if local.is_empty() { english } else { local },
-                    english
-                ),
+                    english,
+                )
+                .trim()
+                .to_string(),
             )
         })
         .collect::<Vec<_>>();
@@ -304,7 +308,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected_bible_ids.len()
     );
     for id in &selected_bible_ids {
-        if let Some((_, local, english, lang)) = bibles.iter().find(|(k, _, _, _)| k == id) {
+        if let Some((_, local, english, lang, _)) = bibles.iter().find(|(k, _, _, _, _)| k == id) {
             println!(
                 "    - {}{}",
                 if local.is_empty() { english } else { local },
@@ -336,8 +340,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         include_originals,
     };
 
-    // Create DB sink and run the orchestrator
-    let sink = SqliteDbSink::from("bible.db".to_string());
     setup.run_with_sink(selection, &sink).map_err(|e| {
         println!("Setup failed: {e}");
         e

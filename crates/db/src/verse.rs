@@ -5,8 +5,10 @@ use crate::{Crud, FromRow, Queriable};
 
 use common::Verse;
 
+mod index;
 mod search;
 
+pub use index::*;
 pub use search::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

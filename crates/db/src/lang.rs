@@ -1,7 +1,7 @@
-use rusqlite::{Result, Row};
+use rusqlite::Row;
 use serde::{Deserialize, Serialize};
 
-use crate::{Connection, Crud, FromRow, Queriable};
+use crate::{Connection, Crud, FromRow, Queriable, Result};
 
 use common::Language;
 
@@ -33,7 +33,7 @@ impl DbLanguage {
 }
 
 impl FromRow for DbLanguage {
-    fn from_row(row: &Row) -> Result<Self> {
+    fn from_row(row: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get("id")?,
             direction: row.get("direction")?,

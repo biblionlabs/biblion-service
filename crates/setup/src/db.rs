@@ -1,14 +1,40 @@
 use crate::error::Result;
-use crate::models;
+use crate::{BibleInstallStatus, models};
 
 mod sqlite;
 
+use service_db::IndexedVerse;
 pub use sqlite::*;
 
 /// Trait that consumers implement to receive parsed data and insert to DB.
 ///
 /// Methods are so sinking can perform DB I/O concurrently.
 pub trait DbSink: Send + Sync {
+    fn has_cross_references(&self, _expected_books: &[String]) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn has_languages(&self, _expected_langs: &[String]) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn is_bible_installed(
+        &self,
+        bible_id: &str,
+        expected_books: &[(String, usize)],
+    ) -> Result<bool> {
+        self.get_bible_install_stats(bible_id, expected_books)
+            .map(|s| s.is_complete())
+    }
+
+    fn get_bible_install_stats(
+        &self,
+        _bible_id: &str,
+        _expected_books: &[(String, usize)],
+    ) -> Result<BibleInstallStatus> {
+        Ok(BibleInstallStatus::NotInstalled)
+    }
+
     fn insert_cross_reference(&self, _book: &str, _data: &models::CrossReference) -> Result<()> {
         Ok(())
     }
@@ -61,6 +87,10 @@ pub trait DbSink: Send + Sync {
         _verse: usize,
         _text: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    fn index_bible_verses(&self, _verses: Vec<IndexedVerse>) -> Result<()> {
         Ok(())
     }
 
