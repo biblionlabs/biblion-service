@@ -26,7 +26,7 @@ pub struct SearchedVerse {
 impl SearchedVerse {
     pub fn from_search(search: &str, index: Arc<Option<VerseIndex>>) -> Result<Vec<Self>> {
         if let Some(idx) = index.as_ref() {
-            if let Ok(results) = idx.search(search, 100, true) {
+            if let Ok(results) = idx.search(search, 50, true) {
                 return Ok(results
                     .into_iter()
                     .map(|r| SearchedVerse {

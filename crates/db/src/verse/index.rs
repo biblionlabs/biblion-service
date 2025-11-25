@@ -2,11 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::ops::Bound;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{
-    BooleanQuery, FuzzyTermQuery, Occur, Query, QueryParser, RangeQuery, TermQuery,
-};
-use tantivy::schema::*;
+use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
+use tantivy::tokenizer::{AsciiFoldingFilter, LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument};
+use tantivy::{IndexWriter, schema::*};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexedVerse {
@@ -28,14 +27,18 @@ pub struct VerseIndex {
 impl VerseIndex {
     pub fn new(index_path: impl AsRef<Path>) -> tantivy::Result<Self> {
         let mut schema_builder = Schema::builder();
+        let text_analyzer = TextAnalyzer::builder(NgramTokenizer::new(3, 5, false)?)
+            .filter(LowerCaser)
+            .filter(AsciiFoldingFilter)
+            .build();
 
         // Definir campos del índice
         schema_builder.add_text_field("bible_id", STRING | STORED);
         schema_builder.add_text_field("bible_name", TEXT | STORED);
         schema_builder.add_text_field("book_id", STRING | STORED);
         schema_builder.add_text_field("book_name", TEXT | STORED);
-        schema_builder.add_i64_field("chapter", STORED | INDEXED);
-        schema_builder.add_i64_field("verse", STORED | INDEXED);
+        schema_builder.add_i64_field("chapter", STORED | INDEXED | FAST);
+        schema_builder.add_i64_field("verse", STORED | INDEXED | FAST);
         schema_builder.add_text_field("text", TEXT | STORED);
 
         let schema = schema_builder.build();
@@ -44,6 +47,11 @@ impl VerseIndex {
         std::fs::create_dir_all(&index_path)?;
         let index = Index::create_in_dir(&index_path, schema.clone())
             .or_else(|_| Index::open_in_dir(&index_path))?;
+
+        index.tokenizers().register("custom_text", text_analyzer);
+
+        let mut writer: IndexWriter = index.writer(50_000_000)?;
+        writer.commit()?;
 
         let reader = index
             .reader_builder()
@@ -316,6 +324,12 @@ impl VerseIndex {
                 text,
             });
         }
+
+        results.sort_by(|a, b| {
+            a.chapter
+                .cmp(&b.chapter)
+                .then_with(|| a.verse.cmp(&b.verse))
+        });
 
         Ok(results)
     }
