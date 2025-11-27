@@ -315,7 +315,6 @@ impl Setup {
 
         let books_dir = bible_manifest_path.parent().unwrap().join("books");
         let mut expected_books_with_verses: Vec<(String, usize)> = Vec::new();
-        let mut total_expected_verses = 0usize;
 
         for book_id in &expected_book_ids {
             let book_path = books_dir.join(format!("{}.json", book_id));
@@ -337,7 +336,6 @@ impl Setup {
                 .sum::<usize>();
 
             expected_books_with_verses.push((book_id.clone(), verse_count));
-            total_expected_verses += verse_count;
         }
 
         let install_status = sink.get_bible_install_stats(bible_id, &expected_books_with_verses)?;
@@ -762,13 +760,19 @@ impl Setup {
             bibles_to_install.len()
         ));
 
+        self.emit::<event::Message>("Clearing old search index... ".into());
+        sink.clear_index()?;
+
+        let mut all_verses_to_index: Vec<IndexedVerse> = Vec::new();
+
+        self.emit::<event::Message>("Collecting verses from existing bibles...".into());
+        let existing_verses = self.collect_existing_verses()?;
+        all_verses_to_index.extend(existing_verses);
+
         for (bible_id, manifest_path) in &manifests {
-            // Solo instalar si está en la lista
             if !bibles_to_install.contains(bible_id) {
                 continue;
             }
-
-            let mut verses_indexed = Vec::new();
 
             let maybe_global = manifest
                 .get("bibles")
@@ -803,10 +807,10 @@ impl Setup {
 
             let text = std::fs::read_to_string(manifest_path)?;
             if let Ok(bv) = serde_json::from_str::<models::BibleVariant>(&text) {
-                let total = (bv.chapter_headings.len() + 1) as u64;
+                let total = bv.chapter_headings.len() as u64;
                 let mut current = 0u64;
 
-                for (book, chs) in bv.chapter_headings.iter() {
+                for (book, chs) in &bv.chapter_headings {
                     current += 1;
                     for (i, header) in chs.iter().enumerate() {
                         if !header.is_empty() {
@@ -815,7 +819,6 @@ impl Setup {
                     }
                     self.emit::<event::Progress>((bible_id.clone(), current, total));
                 }
-                self.emit::<event::Progress>((bible_id.clone(), current, total));
             }
 
             let books: Vec<_> = book_files
@@ -862,15 +865,16 @@ impl Setup {
                         for content in verse_contents {
                             match content {
                                 models::Content::Raw(s) => {
-                                    verses_indexed.push(IndexedVerse {
+                                    all_verses_to_index.push(IndexedVerse {
                                         bible_id: bible_id.clone(),
                                         bible_name: bible_name.clone(),
                                         book_id: book_id.clone(),
                                         book_name: book_obj.name.long.clone(),
-                                        chapter: chapter_idx as _,
-                                        verse: verse_idx as _,
+                                        chapter: chapter_idx as i32,
+                                        verse: verse_idx as i32,
                                         text: s.clone(),
                                     });
+
                                     sink.insert_verse(book_id, chapter_idx, verse_idx, s)?;
                                 }
                                 models::Content::Note { contents, .. } => {
@@ -890,14 +894,90 @@ impl Setup {
 
                 self.emit::<event::Progress>((bible_id.clone(), current, total));
             }
+        }
 
-            self.emit::<event::Message>(format!("Indexing {bible_id} verses ({})...", verses_indexed.len()));
-            sink.index_bible_verses(verses_indexed)?;
-
-            self.emit::<event::Progress>((bible_id.clone(), current, total));
+        if !all_verses_to_index.is_empty() {
+            self.emit::<event::Message>(format!(
+                "Building search index ({} verses)...",
+                all_verses_to_index.len()
+            ));
+            sink.index_bible_verses(all_verses_to_index)?;
         }
 
         Ok(())
+    }
+
+    fn collect_existing_verses(&self) -> Result<Vec<IndexedVerse>> {
+        let mut verses = Vec::new();
+
+        let bibles_dir = self.cache_path.join("bibles");
+
+        // Iterar sobre carpetas de biblias en caché
+        if !bibles_dir.exists() {
+            return Ok(verses);
+        }
+
+        let entries = std::fs::read_dir(&bibles_dir)?;
+
+        for entry in entries.flatten() {
+            let bible_path = entry.path();
+            if !bible_path.is_dir() {
+                continue;
+            }
+
+            let Some(bible_id) = bible_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+
+            let manifest_path = bible_path.join("manifest.json");
+            if !manifest_path.exists() {
+                continue;
+            }
+
+            // Leer manifest de la biblia
+            let text = std::fs::read_to_string(&manifest_path)?;
+            let Ok(bv) = serde_json::from_str::<models::BibleVariant>(&text) else {
+                continue;
+            };
+
+            let bible_name = bible_id.to_string();
+            let books_dir = bible_path.join("books");
+
+            // Leer cada libro desde caché
+            for (book_id, _book_name_from_manifest) in &bv.book_names {
+                let book_path = books_dir.join(format!("{}.json", book_id));
+
+                if !book_path.exists() {
+                    continue;
+                }
+
+                let data = std::fs::read_to_string(&book_path)?;
+                let Ok(book_obj) = serde_json::from_str::<models::Book>(&data) else {
+                    continue;
+                };
+
+                // Extraer versos del libro
+                for (chapter_idx, chapter) in book_obj.contents.iter().enumerate() {
+                    for (verse_idx, verse_contents) in chapter.iter().enumerate() {
+                        for content in verse_contents {
+                            if let models::Content::Raw(text) = content {
+                                verses.push(IndexedVerse {
+                                    bible_id: bible_id.to_string(),
+                                    bible_name: bible_name.clone(),
+                                    book_id: book_id.clone(),
+                                    book_name: book_obj.name.long.clone(),
+                                    chapter: chapter_idx as i32,
+                                    verse: verse_idx as i32,
+                                    text: text.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(verses)
     }
 
     pub fn install_langs(&self, sink: &impl DbSink, languages: &[String]) -> Result<()> {

@@ -274,6 +274,17 @@ impl DbSink for SqliteDbSink {
         Ok(())
     }
 
+    fn clear_index(&self) -> Result<()> {
+        let binding = self.db.verse_index();
+        let Some(index) = binding.as_ref() else {
+            return Ok(());
+        };
+
+        index.clear()?;
+
+        Ok(())
+    }
+
     fn index_bible_verses(&self, verses: Vec<IndexedVerse>) -> Result<()> {
         let binding = self.db.verse_index();
         let Some(index) = binding.as_ref() else {

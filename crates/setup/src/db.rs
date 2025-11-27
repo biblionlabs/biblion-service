@@ -90,6 +90,10 @@ pub trait DbSink: Send + Sync {
         Ok(())
     }
 
+    fn clear_index(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn index_bible_verses(&self, _verses: Vec<IndexedVerse>) -> Result<()> {
         Ok(())
     }

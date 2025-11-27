@@ -3,7 +3,9 @@ use std::ops::Bound;
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
-use tantivy::tokenizer::{AsciiFoldingFilter, LowerCaser, NgramTokenizer, TextAnalyzer};
+use tantivy::tokenizer::{
+    AsciiFoldingFilter, LowerCaser, NgramTokenizer, RemoveLongFilter, TextAnalyzer,
+};
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument};
 use tantivy::{IndexWriter, schema::*};
 
@@ -28,6 +30,7 @@ impl VerseIndex {
     pub fn new(index_path: impl AsRef<Path>) -> tantivy::Result<Self> {
         let mut schema_builder = Schema::builder();
         let text_analyzer = TextAnalyzer::builder(NgramTokenizer::new(3, 5, false)?)
+            .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
             .filter(AsciiFoldingFilter)
             .build();
@@ -65,29 +68,10 @@ impl VerseIndex {
         })
     }
 
-    pub fn index_verse(&self, verse: &IndexedVerse) -> tantivy::Result<()> {
-        let mut writer = self.index.writer(50_000_000)?;
-
-        let bible_id = self.schema.get_field("bible_id").unwrap();
-        let bible_name = self.schema.get_field("bible_name").unwrap();
-        let book_id = self.schema.get_field("book_id").unwrap();
-        let book_name = self.schema.get_field("book_name").unwrap();
-        let chapter = self.schema.get_field("chapter").unwrap();
-        let verse_field = self.schema.get_field("verse").unwrap();
-        let text = self.schema.get_field("text").unwrap();
-
-        let mut doc = TantivyDocument::default();
-        doc.add_text(bible_id, &verse.bible_id);
-        doc.add_text(bible_name, &verse.bible_name);
-        doc.add_text(book_id, &verse.book_id);
-        doc.add_text(book_name, &verse.book_name);
-        doc.add_i64(chapter, verse.chapter as i64);
-        doc.add_i64(verse_field, verse.verse as i64);
-        doc.add_text(text, &verse.text);
-
-        writer.add_document(doc)?;
+    pub fn clear(&self) -> crate::Result<()> {
+        let mut writer: IndexWriter = self.index.writer(500_000_000)?;
+        writer.delete_all_documents()?;
         writer.commit()?;
-
         Ok(())
     }
 
