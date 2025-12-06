@@ -6,9 +6,12 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
-common = { version = "0.1.0", path = "../common" }
-deunicode = "1.6.2"
-regex = "1.12.2"
-rusqlite = "0.37.0"
+common = { version = "0.1", path = "../common" }
+deunicode = "1.6"
+regex = "1.12"
+rusqlite = "0.37"
 serde.workspace = true
-tantivy = "0.25.0"
+tantivy = "0.25"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
