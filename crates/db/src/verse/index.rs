@@ -4,7 +4,7 @@ use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
 use tantivy::tokenizer::{
-    AsciiFoldingFilter, LowerCaser, NgramTokenizer, RemoveLongFilter, TextAnalyzer,
+    AsciiFoldingFilter, LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer,
 };
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument};
 use tantivy::{IndexWriter, schema::*};
@@ -22,6 +22,7 @@ pub struct IndexedVerse {
 
 pub struct VerseIndex {
     index: Index,
+    is_new: bool,
     reader: IndexReader,
     schema: Schema,
 }
@@ -29,7 +30,7 @@ pub struct VerseIndex {
 impl VerseIndex {
     pub fn new(index_path: impl AsRef<Path>) -> tantivy::Result<Self> {
         let mut schema_builder = Schema::builder();
-        let text_analyzer = TextAnalyzer::builder(NgramTokenizer::new(3, 5, false)?)
+        let text_analyzer = TextAnalyzer::builder(SimpleTokenizer::default())
             .filter(RemoveLongFilter::limit(40))
             .filter(LowerCaser)
             .filter(AsciiFoldingFilter)
@@ -44,12 +45,15 @@ impl VerseIndex {
         schema_builder.add_i64_field("verse", STORED | INDEXED | FAST);
         schema_builder.add_text_field("text", TEXT | STORED);
 
+        let mut is_new = true;
         let schema = schema_builder.build();
 
         // Crear o abrir índice
         std::fs::create_dir_all(&index_path)?;
-        let index = Index::create_in_dir(&index_path, schema.clone())
-            .or_else(|_| Index::open_in_dir(&index_path))?;
+        let index = Index::create_in_dir(&index_path, schema.clone()).or_else(|_| {
+            is_new = false;
+            Index::open_in_dir(&index_path)
+        })?;
 
         index.tokenizers().register("custom_text", text_analyzer);
 
@@ -65,7 +69,12 @@ impl VerseIndex {
             index,
             reader,
             schema,
+            is_new,
         })
+    }
+
+    pub fn is_new(&self) -> bool {
+        self.is_new
     }
 
     pub fn clear(&self) -> crate::Result<()> {

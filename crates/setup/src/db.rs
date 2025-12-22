@@ -2,9 +2,11 @@ use crate::error::Result;
 use crate::{BibleInstallStatus, models};
 
 mod sqlite;
+mod tantivy;
 
 use service_db::IndexedVerse;
 pub use sqlite::*;
+pub use tantivy::*;
 
 /// Trait that consumers implement to receive parsed data and insert to DB.
 ///
