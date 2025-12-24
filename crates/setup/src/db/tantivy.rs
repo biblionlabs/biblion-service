@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use service_db::{IndexedVerse, VerseIndex};
 
@@ -7,21 +8,27 @@ use crate::{BibleInstallStatus, Result};
 use super::DbSink;
 
 pub struct TantivySink {
-    index: Option<VerseIndex>,
+    index: Arc<Option<VerseIndex>>,
 }
 
 impl From<String> for TantivySink {
     fn from(db_path: String) -> Self {
         let index_path = PathBuf::from(db_path);
-        let index = VerseIndex::new(index_path).ok();
+        let index = Arc::new(VerseIndex::new(index_path).ok());
         Self { index }
     }
 }
 
 impl From<PathBuf> for TantivySink {
     fn from(index_path: PathBuf) -> Self {
-        let index = VerseIndex::new(index_path).ok();
+        let index = Arc::new(VerseIndex::new(index_path).ok());
         Self { index }
+    }
+}
+
+impl TantivySink {
+    pub fn verse_index(&self) -> Arc<Option<VerseIndex>> {
+        self.index.clone()
     }
 }
 
