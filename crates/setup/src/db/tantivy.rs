@@ -46,8 +46,9 @@ impl DbSink for TantivySink {
         _bible_id: &str,
         expected_books: &[(String, usize)],
     ) -> Result<BibleInstallStatus> {
-        let Some(index) = self.index.as_ref() else {
-            return Err(crate::Error::Other("Index not intializated".into()));
+        let maybe_index = self.index.as_ref();
+        let Some(index) = maybe_index else {
+            return Ok(BibleInstallStatus::NotInstalled);
         };
 
         if index.is_new() {
@@ -61,12 +62,9 @@ impl DbSink for TantivySink {
     }
 
     fn clear_index(&self) -> Result<()> {
-        let Some(index) = self.index.as_ref() else {
-            return Ok(());
-        };
-
-        index.clear()?;
-
+        if let Some(index) = self.index.as_ref() {
+            index.clear()?;
+        }
         Ok(())
     }
 
@@ -84,7 +82,6 @@ impl DbSink for TantivySink {
     }
 
     fn finalize(&self) -> Result<()> {
-        // any final steps like rebuilding indices
         Ok(())
     }
 }
