@@ -292,6 +292,69 @@ impl Setup {
         Ok(bible_entries)
     }
 
+    pub fn list_installed_books(&self) -> Result<Vec<(String, Vec<String>)>> {
+        let mut result: Vec<(String, Vec<String>)> = Vec::new();
+        let bibles_dir = self.cache_path.join("bibles");
+
+        if !bibles_dir.exists() {
+            return Ok(result);
+        }
+
+        for entry in std::fs::read_dir(&bibles_dir)? {
+            let entry = entry?;
+            let bible_path = entry.path();
+            if !bible_path.is_dir() {
+                continue;
+            }
+
+            let Some(bible_id) = bible_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+
+            let mut book_names: Vec<String> = Vec::new();
+            let manifest_path = bible_path.join("manifest.json");
+            let books_dir = bible_path.join("books");
+
+            if books_dir.exists() {
+                for book_entry in std::fs::read_dir(&books_dir)? {
+                    let book_entry = book_entry?;
+                    let path = book_entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                        continue;
+                    }
+
+                    let data = std::fs::read_to_string(&path)?;
+                    let Ok(book_obj) = serde_json::from_str::<models::Book>(&data) else {
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            book_names.push(stem.to_string());
+                        }
+                        continue;
+                    };
+
+                    book_names.push(book_obj.name.long.clone());
+                }
+            } else if manifest_path.exists() {
+                let text = std::fs::read_to_string(&manifest_path)?;
+                let Ok(bv) = serde_json::from_str::<models::BibleVariant>(&text) else {
+                    result.push((bible_id, book_names));
+                    continue;
+                };
+
+                for (_book_id, book_name) in &bv.book_names {
+                    book_names.push(book_name.long.clone());
+                }
+            }
+
+            result.push((bible_id, book_names));
+        }
+
+        Ok(result)
+    }
+
     fn get_bible_status(&self, sink: &impl DbSink, bible_id: &str) -> Result<BibleInstallStatus> {
         let bible_manifest_path = self
             .cache_path
