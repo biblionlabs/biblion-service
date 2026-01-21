@@ -24,9 +24,15 @@ pub struct SearchedVerse {
 }
 
 impl SearchedVerse {
-    pub fn from_search(search: &str, index: Arc<Option<VerseIndex>>) -> Result<Vec<Self>> {
+    pub fn from_search(
+        search: &str,
+        index: Arc<Option<VerseIndex>>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Self>> {
         if let Some(idx) = index.as_ref() {
-            if let Ok(results) = idx.search(search, 50, true) {
+            if let Ok(results) = idx
+                .search(search, limit.unwrap_or(50), true)
+            {
                 return Ok(results
                     .into_iter()
                     .map(|r| SearchedVerse {

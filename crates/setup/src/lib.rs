@@ -637,7 +637,7 @@ impl Setup {
             let books_dir = bible_dir.join("books");
             std::fs::create_dir_all(&books_dir)?;
 
-            let total = (books.len() + 1) as u64;
+            let total = books.len() as u64;
             let mut current = 0u64;
             for book_id in books {
                 current += 1;

@@ -43,7 +43,7 @@ impl DbSink for TantivySink {
 
     fn get_bible_install_stats(
         &self,
-        _bible_id: &str,
+        bible_id: &str,
         expected_books: &[(String, usize)],
     ) -> Result<BibleInstallStatus> {
         let maybe_index = self.index.as_ref();
@@ -55,10 +55,21 @@ impl DbSink for TantivySink {
             return Ok(BibleInstallStatus::NotInstalled);
         }
 
-        Ok(BibleInstallStatus::Complete {
-            total_books: expected_books.len(),
-            total_verses: expected_books.iter().map(|(_, len)| *len).sum(),
-        })
+        match index.search(bible_id, 1, false) {
+            Ok(res) => {
+                if res.is_empty() {
+                    Ok(BibleInstallStatus::NotInstalled)
+                } else {
+                    Ok(BibleInstallStatus::Complete {
+                        total_books: expected_books.len(),
+                        total_verses: expected_books.iter().map(|(_, len)| *len).sum(),
+                    })
+                }
+            }
+            Err(_) => {
+                Ok(BibleInstallStatus::NotInstalled)
+            }
+        }
     }
 
     fn clear_index(&self) -> Result<()> {
