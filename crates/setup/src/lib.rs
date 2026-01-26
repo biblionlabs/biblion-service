@@ -829,7 +829,7 @@ impl Setup {
         let mut all_verses_to_index: Vec<IndexedVerse> = Vec::new();
 
         self.emit::<event::Message>("Collecting verses from existing bibles...".into());
-        let existing_verses = self.collect_existing_verses()?;
+        let (installed_bibles, existing_verses) = self.collect_existing_verses()?;
         all_verses_to_index.extend(existing_verses);
 
         for (bible_id, manifest_path) in &manifests {
@@ -928,15 +928,20 @@ impl Setup {
                         for content in verse_contents {
                             match content {
                                 models::Content::Raw(s) => {
-                                    all_verses_to_index.push(IndexedVerse {
-                                        bible_id: bible_id.clone(),
-                                        bible_name: bible_name.clone(),
-                                        book_id: book_id.clone(),
-                                        book_name: book_obj.name.long.clone(),
-                                        chapter: chapter_idx as i32,
-                                        verse: verse_idx as i32,
-                                        text: s.clone(),
-                                    });
+                                    if !installed_bibles.contains(&bible_id) {
+                                        all_verses_to_index.push(IndexedVerse {
+                                            bible_id: bible_id.clone(),
+                                            bible_name: bible_name.clone(),
+                                            book_id: book_id.clone(),
+                                            book_name: book_obj.name.long.clone(),
+                                            chapter: chapter_idx as i32,
+                                            verse: verse_idx as i32,
+                                            text: s.clone(),
+                                        });
+                                        self.emit::<event::Message>(format!(
+                                            "index verse push: {current_chapter}"
+                                        ));
+                                    }
 
                                     sink.insert_verse(book_id, chapter_idx, verse_idx, s)?;
                                 }
@@ -970,14 +975,15 @@ impl Setup {
         Ok(())
     }
 
-    fn collect_existing_verses(&self) -> Result<Vec<IndexedVerse>> {
+    fn collect_existing_verses(&self) -> Result<(Vec<String>, Vec<IndexedVerse>)> {
         let mut verses = Vec::new();
+        let mut installed_bibles = Vec::new();
 
         let bibles_dir = self.cache_path.join("bibles");
 
         // Iterar sobre carpetas de biblias en caché
         if !bibles_dir.exists() {
-            return Ok(verses);
+            return Ok((installed_bibles, verses));
         }
 
         let entries = std::fs::read_dir(&bibles_dir)?;
@@ -1005,6 +1011,8 @@ impl Setup {
 
             let bible_name = bible_id.to_string();
             let books_dir = bible_path.join("books");
+
+            installed_bibles.push(bible_name.clone());
 
             // Leer cada libro desde caché
             for (book_id, _book_name_from_manifest) in &bv.book_names {
@@ -1040,7 +1048,7 @@ impl Setup {
             }
         }
 
-        Ok(verses)
+        Ok((installed_bibles, verses))
     }
 
     pub fn install_langs(&self, sink: &impl DbSink, languages: &[String]) -> Result<()> {
