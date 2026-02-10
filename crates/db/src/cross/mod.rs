@@ -5,6 +5,12 @@ use crate::{Crud, FromRow, Queriable};
 
 use common::CrossReference;
 
+mod index;
+mod search;
+
+pub use index::*;
+pub use search::*;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbCrossReference {
     pub id: i64,

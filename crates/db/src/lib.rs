@@ -199,6 +199,7 @@ pub trait Joinable<A: Queriable + FromRow, B: Queriable + FromRow> {
 pub struct Sqlite {
     conn: Connection,
     index: Arc<Option<VerseIndex>>,
+    cross_index: Arc<Option<CrossRefIndex>>,
 }
 
 impl Migrate for Sqlite {
@@ -282,9 +283,20 @@ impl Sqlite {
             .unwrap_or_else(|| Path::new("."))
             .join("index");
 
-        let index = Arc::new(VerseIndex::new(index_path).ok());
+        let index = Arc::new(VerseIndex::new(&index_path).ok());
 
-        let db = Self { conn, index };
+        let cross_index_path = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("cross_index");
+
+        let cross_index = Arc::new(CrossRefIndex::new(cross_index_path).ok());
+
+        let db = Self {
+            conn,
+            index,
+            cross_index,
+        };
 
         db.migrate()?;
 
@@ -297,5 +309,9 @@ impl Sqlite {
 
     pub fn verse_index(&self) -> Arc<Option<VerseIndex>> {
         self.index.clone()
+    }
+
+    pub fn cross_ref_index(&self) -> Arc<Option<CrossRefIndex>> {
+        self.cross_index.clone()
     }
 }

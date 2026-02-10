@@ -9,7 +9,7 @@
 
 use reqwest::blocking::Client;
 use serde_json::Value;
-use service_db::IndexedVerse;
+use service_db::{IndexedCrossReference, IndexedVerse};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -702,21 +702,29 @@ impl Setup {
         Ok(out)
     }
 
-    pub fn install_cross(&self, sink: &impl DbSink) -> Result<()> {
+    pub fn install_cross(&self, sink: &impl DbSink) -> Result<Vec<IndexedCrossReference>> {
         let (manifest, _manifest_path) = self.load_manifest()?;
 
-        let expected_books = manifest
+        let book_names_english: HashMap<String, String> = manifest
             .get("book_names_english")
             .and_then(|v| v.as_object())
-            .map(|o| o.keys().cloned().collect::<Vec<_>>())
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
+        let expected_books: Vec<String> = book_names_english.keys().cloned().collect();
+
         if sink.has_cross_references(&expected_books).unwrap_or(false) {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         self.emit::<event::Message>("Starting crossref caching".into());
         let cross_paths = self.cache_crossrefs(&manifest)?;
+
+        let mut all_cross_refs: Vec<IndexedCrossReference> = Vec::new();
 
         // parse crossrefs and call sink
         for path in cross_paths {
@@ -727,17 +735,71 @@ impl Setup {
                 .to_string();
             let text = std::fs::read_to_string(&path)?;
             if let Ok(parsed) = serde_json::from_str::<models::CrossReference>(&text) {
-                // consumer decides how to insert the structure
+                let source_book_name = book_names_english
+                    .get(&book_id)
+                    .cloned()
+                    .unwrap_or_default();
+
+                // Recopilar referencias para indexar en Tantivy
+                for (source_chapter, cross) in parsed.iter() {
+                    for (source_verse, targets) in cross.iter() {
+                        let s_chapter: i32 = source_chapter.parse().unwrap_or(0);
+                        let s_verse: i32 = source_verse.parse().unwrap_or(0);
+
+                        for target in targets {
+                            let mut iter = target.iter();
+                            let target_book_id = if let Some(Reference::String(b)) = iter.next() {
+                                b.clone()
+                            } else {
+                                continue;
+                            };
+                            let target_book_name = book_names_english
+                                .get(&target_book_id)
+                                .cloned()
+                                .unwrap_or_default();
+
+                            let remaining: Vec<_> = iter.collect();
+                            for chunk in remaining.chunks(2) {
+                                let t_chapter = match chunk.first() {
+                                    Some(Reference::Integer(c)) => *c,
+                                    _ => continue,
+                                };
+                                let t_verse = match chunk.get(1) {
+                                    Some(Reference::Integer(v)) => *v,
+                                    _ => continue,
+                                };
+
+                                all_cross_refs.push(IndexedCrossReference {
+                                    source_book: book_id.clone(),
+                                    source_book_name: source_book_name.clone(),
+                                    source_chapter: s_chapter,
+                                    source_verse: s_verse,
+                                    target_book: target_book_id.clone(),
+                                    target_book_name: target_book_name.clone(),
+                                    target_chapter: t_chapter,
+                                    target_verse: t_verse,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // consumer decides how to insert the structure to SQLite
                 sink.insert_cross_reference(&book_id, &parsed)?;
             } else {
                 self.emit::<event::Message>(format!("Failed to parse crossref {path:?}"));
             }
         }
 
-        Ok(())
+        Ok(all_cross_refs)
     }
 
-    pub fn install_bibles(&self, sink: &impl DbSink, bible_ids: &[String]) -> Result<()> {
+    pub fn install_bibles(
+        &self,
+        sink: &impl DbSink,
+        bible_ids: &[String],
+        cross_refs_to_index: Vec<IndexedCrossReference>,
+    ) -> Result<()> {
         // Load manifest
         let (manifest, _manifest_path) = self.load_manifest()?;
 
@@ -750,6 +812,10 @@ impl Setup {
         let book_files = self.cache_bible_books(&manifests)?;
 
         let mut bibles_to_install = Vec::new();
+        self.emit::<event::Message>(format!(
+            "Starting process bibles to install: {}",
+            manifests.len()
+        ));
 
         for (bible_id, manifest_path) in &manifests {
             let text = std::fs::read_to_string(manifest_path)?;
@@ -763,6 +829,7 @@ impl Setup {
 
             let mut expected_books_with_verses: Vec<(String, usize)> = Vec::new();
 
+            self.emit::<event::Message>(format!("{bible_id}: {}", bv.book_names.len()));
             for book_id in bv.book_names.keys() {
                 let book_path = book_files
                     .iter()
@@ -792,6 +859,7 @@ impl Setup {
                     .map(|chapter| chapter.iter().filter(|verse| !verse.is_empty()).count())
                     .sum::<usize>();
 
+                self.emit::<event::Message>(format!("{bible_id}: {} verses", verse_count));
                 expected_books_with_verses.push((book_id.clone(), verse_count));
             }
 
@@ -813,6 +881,7 @@ impl Setup {
                 }
             }
         }
+        self.emit::<event::Message>(format!("Bibles to install: {}", bibles_to_install.len()));
 
         if bibles_to_install.is_empty() {
             return Ok(());
@@ -881,7 +950,9 @@ impl Setup {
                         }
                     }
                     self.emit::<event::Progress>((bible_id.clone(), current, total));
+                    self.emit::<event::Message>(format!("884: {bible_id}: {current}/{total}"));
                 }
+                self.emit::<event::Message>(format!("886: chapter_headings"));
             }
 
             let books: Vec<_> = book_files
@@ -897,6 +968,7 @@ impl Setup {
             } else {
                 &name_local
             };
+            self.emit::<event::Message>(format!("902: {bible_name} laksjdhf"));
 
             for (_, book_id, path) in books {
                 current += 1;
@@ -909,6 +981,7 @@ impl Setup {
                     ));
                     continue;
                 };
+                self.emit::<event::Message>(format!("915: {book_obj:?}"));
 
                 sink.insert_book_meta(
                     bible_id,
@@ -964,13 +1037,27 @@ impl Setup {
             }
         }
 
-        if !all_verses_to_index.is_empty() {
+        // Indexar versículos y referencias cruzadas en un solo paso
+        let has_verses = !all_verses_to_index.is_empty();
+        let has_cross_refs = !cross_refs_to_index.is_empty();
+
+        if has_verses || has_cross_refs {
             self.emit::<event::Message>(format!(
-                "Building search index ({} verses)...",
-                all_verses_to_index.len()
+                "Building search indexes ({} verses, {} cross-references)...",
+                all_verses_to_index.len(),
+                cross_refs_to_index.len()
             ));
-            sink.index_bible_verses(all_verses_to_index)?;
+
+            if has_verses {
+                sink.index_bible_verses(all_verses_to_index)?;
+            }
+
+            if has_cross_refs {
+                sink.clear_cross_ref_index()?;
+                sink.index_cross_references(cross_refs_to_index)?;
+            }
         }
+        self.emit::<event::Message>("end indexing".to_string());
 
         Ok(())
     }
@@ -1090,9 +1177,10 @@ impl Setup {
         // Save selection
         self.save_selection(&selection)?;
 
-        self.install_cross(sink)?;
+        // Recopilar las referencias cruzadas para indexar junto con los versículos
+        let cross_refs_to_index = self.install_cross(sink)?;
         self.install_langs(sink, &selection.languages)?;
-        self.install_bibles(sink, &selection.bibles)?;
+        self.install_bibles(sink, &selection.bibles, cross_refs_to_index)?;
 
         // finalize sink (commit or vacuum etc)
         sink.finalize()?;

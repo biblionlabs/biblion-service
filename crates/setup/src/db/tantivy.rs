@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use service_db::{IndexedVerse, VerseIndex};
+use service_db::{CrossRefIndex, IndexedCrossReference, IndexedVerse, VerseIndex};
 
 use crate::{BibleInstallStatus, Result};
 
@@ -9,26 +9,39 @@ use super::DbSink;
 
 pub struct TantivySink {
     index: Arc<Option<VerseIndex>>,
+    cross_index: Arc<Option<CrossRefIndex>>,
 }
 
 impl From<String> for TantivySink {
     fn from(db_path: String) -> Self {
-        let index_path = PathBuf::from(db_path);
-        let index = Arc::new(VerseIndex::new(index_path).ok());
-        Self { index }
+        let base_path = PathBuf::from(&db_path);
+        let index = Arc::new(VerseIndex::new(&base_path).ok());
+        let cross_path = base_path.parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("cross_index");
+        let cross_index = Arc::new(CrossRefIndex::new(cross_path).ok());
+        Self { index, cross_index }
     }
 }
 
 impl From<PathBuf> for TantivySink {
     fn from(index_path: PathBuf) -> Self {
-        let index = Arc::new(VerseIndex::new(index_path).ok());
-        Self { index }
+        let index = Arc::new(VerseIndex::new(&index_path).ok());
+        let cross_path = index_path.parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("cross_index");
+        let cross_index = Arc::new(CrossRefIndex::new(cross_path).ok());
+        Self { index, cross_index }
     }
 }
 
 impl TantivySink {
     pub fn verse_index(&self) -> Arc<Option<VerseIndex>> {
         self.index.clone()
+    }
+
+    pub fn cross_ref_index(&self) -> Arc<Option<CrossRefIndex>> {
+        self.cross_index.clone()
     }
 }
 
@@ -86,6 +99,26 @@ impl DbSink for TantivySink {
 
         index
             .index_verses_batch(verses)
+            .map_err(service_db::Error::from)
+            .map_err(crate::Error::from)?;
+
+        Ok(())
+    }
+
+    fn clear_cross_ref_index(&self) -> Result<()> {
+        if let Some(index) = self.cross_index.as_ref() {
+            index.clear()?;
+        }
+        Ok(())
+    }
+
+    fn index_cross_references(&self, refs: Vec<IndexedCrossReference>) -> Result<()> {
+        let Some(index) = self.cross_index.as_ref() else {
+            return Ok(());
+        };
+
+        index
+            .index_cross_references_batch(refs)
             .map_err(service_db::Error::from)
             .map_err(crate::Error::from)?;
 

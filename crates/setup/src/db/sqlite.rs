@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use service_db::{
     Connection, Crud, DbBible, DbBook, DbCrossReference, DbHeader, DbLanguage, DbVerse,
-    DbVerseNote, IndexedVerse, Sqlite,
+    DbVerseNote, IndexedCrossReference, IndexedVerse, Sqlite,
 };
 
 use crate::{BibleInstallStatus, CrossReference, Reference, Result};
@@ -293,6 +293,31 @@ impl DbSink for SqliteDbSink {
 
         index
             .index_verses_batch(verses)
+            .map_err(service_db::Error::from)
+            .map_err(crate::Error::from)?;
+
+        Ok(())
+    }
+
+    fn clear_cross_ref_index(&self) -> Result<()> {
+        let binding = self.db.cross_ref_index();
+        let Some(index) = binding.as_ref() else {
+            return Ok(());
+        };
+
+        index.clear()?;
+
+        Ok(())
+    }
+
+    fn index_cross_references(&self, refs: Vec<IndexedCrossReference>) -> Result<()> {
+        let binding = self.db.cross_ref_index();
+        let Some(index) = binding.as_ref() else {
+            return Ok(());
+        };
+
+        index
+            .index_cross_references_batch(refs)
             .map_err(service_db::Error::from)
             .map_err(crate::Error::from)?;
 
