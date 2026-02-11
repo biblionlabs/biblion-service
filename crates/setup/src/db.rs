@@ -4,7 +4,7 @@ use crate::{BibleInstallStatus, models};
 mod sqlite;
 mod tantivy;
 
-use service_db::{IndexedCrossReference, IndexedVerse};
+use service_db::{IndexedCrossReference, IndexedVerse, SynonymMap};
 pub use sqlite::*;
 pub use tantivy::*;
 
@@ -105,6 +105,10 @@ pub trait DbSink: Send + Sync {
     }
 
     fn index_cross_references(&self, _refs: Vec<IndexedCrossReference>) -> Result<()> {
+        Ok(())
+    }
+
+    fn load_verse_synonyms(&self, _map: SynonymMap) -> Result<()> {
         Ok(())
     }
 

@@ -9,7 +9,7 @@
 
 use reqwest::blocking::Client;
 use serde_json::Value;
-use service_db::{IndexedCrossReference, IndexedVerse};
+use service_db::{IndexedCrossReference, IndexedVerse, SynonymMap};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1140,6 +1140,11 @@ impl Setup {
 
     pub fn install_langs(&self, sink: &impl DbSink, languages: &[String]) -> Result<()> {
         if sink.has_languages(languages).unwrap_or(false) {
+            // Even if languages are installed, still load synonyms
+            let synonym_map = self.download_synonyms(languages)?;
+            if !synonym_map.is_empty() {
+                sink.load_verse_synonyms(synonym_map)?;
+            }
             return Ok(());
         }
 
@@ -1165,7 +1170,80 @@ impl Setup {
             }
         }
 
+        // Download and load synonyms for all selected languages
+        let synonym_map = self.download_synonyms(languages)?;
+        if !synonym_map.is_empty() {
+            sink.load_verse_synonyms(synonym_map)?;
+        }
+
         Ok(())
+    }
+
+    /// Downloads synonym files for the given languages, caching them with a 120-day TTL.
+    /// Returns a merged SynonymMap from all language synonym files.
+    fn download_synonyms(&self, languages: &[String]) -> Result<SynonymMap> {
+        let synonyms_dir = self.cache_path.join("synonyms");
+        std::fs::create_dir_all(&synonyms_dir)?;
+
+        let ttl = Duration::from_secs(120 * 24 * 60 * 60); // 120 days
+        let mut merged = SynonymMap::from_groups(Vec::<Vec<String>>::new());
+
+        for lang in languages {
+            let syn_path = synonyms_dir.join(format!("{lang}.syn"));
+
+            let need_download = if syn_path.exists() {
+                match syn_path.metadata().and_then(|m| m.modified()) {
+                    Ok(modified) => match SystemTime::now().duration_since(modified) {
+                        Ok(elapsed) => elapsed > ttl,
+                        Err(_) => true,
+                    },
+                    Err(_) => true,
+                }
+            } else {
+                true
+            };
+
+            if need_download {
+                let url = format!("https://v1.fetch.bible/synonyms/{lang}.syn");
+                self.emit::<event::Message>(format!("Downloading synonyms for {lang}..."));
+                match self.client.get(&url).send() {
+                    Ok(resp) if resp.status().is_success() => {
+                        let text = resp.text()?;
+                        std::fs::write(&syn_path, text.as_bytes())?;
+                        self.emit::<event::Message>(format!(
+                            "Cached synonyms for {lang}"
+                        ));
+                    }
+                    _ => {
+                        self.emit::<event::Message>(format!(
+                            "Synonyms not available for {lang}, skipping"
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                self.emit::<event::Message>(format!("Using cached synonyms for {lang}"));
+            }
+
+            if syn_path.exists() {
+                match SynonymMap::from_file(&syn_path) {
+                    Ok(map) => {
+                        self.emit::<event::Message>(format!(
+                            "Loaded {} synonym entries for {lang}",
+                            map.len()
+                        ));
+                        merged.merge(&map);
+                    }
+                    Err(e) => {
+                        self.emit::<event::Message>(format!(
+                            "Failed to parse synonyms for {lang}: {e}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(merged)
     }
 
     /// Full run that pipes parsed data to a DbSink so the orchestrator itself can build the DB.

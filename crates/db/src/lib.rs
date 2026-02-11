@@ -10,6 +10,7 @@ mod error;
 mod header;
 mod lang;
 mod notes;
+mod synonym;
 mod verse;
 
 pub use bible::*;
@@ -19,6 +20,7 @@ pub use error::{DB as Error, Result};
 pub use header::*;
 pub use lang::*;
 pub use notes::*;
+pub use synonym::*;
 pub use verse::*;
 
 pub use rusqlite::{Error as SqliteError, Result as SqliteResult};

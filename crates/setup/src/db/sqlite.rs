@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use service_db::{
     Connection, Crud, DbBible, DbBook, DbCrossReference, DbHeader, DbLanguage, DbVerse,
-    DbVerseNote, IndexedCrossReference, IndexedVerse, Sqlite,
+    DbVerseNote, IndexedCrossReference, IndexedVerse, Sqlite, SynonymMap,
 };
 
 use crate::{BibleInstallStatus, CrossReference, Reference, Result};
@@ -333,6 +333,14 @@ impl DbSink for SqliteDbSink {
             text: text.to_string(),
         };
         data.insert(self.conn.clone()).unwrap();
+        Ok(())
+    }
+
+    fn load_verse_synonyms(&self, map: SynonymMap) -> Result<()> {
+        let binding = self.db.verse_index();
+        if let Some(index) = binding.as_ref() {
+            index.load_synonyms(map);
+        }
         Ok(())
     }
 

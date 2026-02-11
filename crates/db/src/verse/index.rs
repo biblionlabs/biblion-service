@@ -8,6 +8,7 @@ use tantivy::query::{
 use tantivy::tokenizer::{
     AsciiFoldingFilter, LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer,
 };
+use crate::synonym::{SynonymMap, SynonymTokenFilter};
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument};
 use tantivy::{IndexWriter, schema::*};
 
@@ -97,6 +98,18 @@ impl VerseIndex {
 
     pub fn is_new(&self) -> bool {
         self.is_new
+    }
+
+    /// Re-registers the "default" tokenizer with synonym expansion.
+    /// Must be called before indexing so that indexed tokens include synonyms.
+    pub fn load_synonyms(&self, map: SynonymMap) {
+        let analyzer = TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .filter(AsciiFoldingFilter)
+            .filter(SynonymTokenFilter::new(map))
+            .build();
+        self.index.tokenizers().register("default", analyzer);
     }
 
     pub fn clear(&self) -> crate::Result<()> {

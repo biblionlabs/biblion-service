@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use service_db::{CrossRefIndex, IndexedCrossReference, IndexedVerse, VerseIndex};
+use service_db::{CrossRefIndex, IndexedCrossReference, IndexedVerse, SynonymMap, VerseIndex};
 
 use crate::{BibleInstallStatus, Result};
 
@@ -122,6 +122,13 @@ impl DbSink for TantivySink {
             .map_err(service_db::Error::from)
             .map_err(crate::Error::from)?;
 
+        Ok(())
+    }
+
+    fn load_verse_synonyms(&self, map: SynonymMap) -> Result<()> {
+        if let Some(index) = self.index.as_ref() {
+            index.load_synonyms(map);
+        }
         Ok(())
     }
 
