@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::ops::Bound;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
+use tantivy::query::{
+    BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, QueryParser, RangeQuery, TermQuery,
+};
 use tantivy::tokenizer::{
     AsciiFoldingFilter, LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer,
 };
@@ -26,6 +28,23 @@ pub struct CrossRefIndex {
     is_new: bool,
     reader: IndexReader,
     schema: Schema,
+}
+
+/// Calcula la distancia Levenshtein apropiada según la longitud del término.
+fn fuzzy_distance_for_term(term: &str) -> u8 {
+    let len = term.chars().count();
+    if len <= 3 {
+        0
+    } else if len <= 6 {
+        1
+    } else {
+        2
+    }
+}
+
+/// Normaliza texto para búsqueda: minúsculas + ascii folding
+fn normalize_query(query: &str) -> String {
+    deunicode::deunicode(&query.to_lowercase())
 }
 
 impl CrossRefIndex {
@@ -121,13 +140,65 @@ impl CrossRefIndex {
         Ok(())
     }
 
+    /// Construye una query para nombres de libros con tolerancia a errores.
+    fn build_book_name_query(
+        &self,
+        book_str: &str,
+        book_name_field: Field,
+        book_id_field: Field,
+    ) -> Box<dyn Query> {
+        let normalized = normalize_query(book_str);
+        let mut sub_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+        // Buscar por book_id exacto
+        let id_term = Term::from_field_text(book_id_field, &normalized);
+        let id_exact = TermQuery::new(id_term, IndexRecordOption::Basic);
+        sub_queries.push((
+            Occur::Should,
+            Box::new(BoostQuery::new(Box::new(id_exact), 10.0)),
+        ));
+
+        // Buscar por book_id uppercase
+        let id_upper = Term::from_field_text(book_id_field, &normalized.to_uppercase());
+        let id_exact_upper = TermQuery::new(id_upper, IndexRecordOption::Basic);
+        sub_queries.push((
+            Occur::Should,
+            Box::new(BoostQuery::new(Box::new(id_exact_upper), 10.0)),
+        ));
+
+        for token in normalized.split_whitespace() {
+            if token.is_empty() {
+                continue;
+            }
+
+            let term = Term::from_field_text(book_name_field, token);
+
+            // Exacta con boost alto
+            let exact = TermQuery::new(term.clone(), IndexRecordOption::WithFreqs);
+            sub_queries.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(exact), 8.0)),
+            ));
+
+            // Fuzzy para tolerar errores (mínimo distancia 1 para nombres)
+            let distance = fuzzy_distance_for_term(token).max(1);
+            let fuzzy = FuzzyTermQuery::new_prefix(term, distance, true);
+            sub_queries.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(fuzzy), 2.0)),
+            ));
+        }
+
+        Box::new(BooleanQuery::new(sub_queries))
+    }
+
     /// Buscar referencias cruzadas por referencia bíblica.
     ///
     /// Busca en ambas direcciones: como source y como target.
     /// Ejemplos de query:
-    /// - "GEN 1:1" → referencias desde/hacia Génesis 1:1
-    /// - "Genesis 1" → referencias desde/hacia Génesis capítulo 1
-    /// - "GEN 1:1-5" → referencias desde/hacia Génesis 1:1 a 1:5
+    /// - "GEN 1:1" -> referencias desde/hacia Génesis 1:1
+    /// - "Genesis 1" -> referencias desde/hacia Génesis capítulo 1
+    /// - "GEN 1:1-5" -> referencias desde/hacia Génesis 1:1 a 1:5
     pub fn search(
         &self,
         query: &str,
@@ -169,7 +240,6 @@ impl CrossRefIndex {
                     "target_verse",
                 ),
                 SearchDirection::Both => {
-                    // Buscar en ambas direcciones y combinar resultados
                     let source_results =
                         self.search(query, limit, SearchDirection::FromSource)?;
                     let target_results =
@@ -189,21 +259,18 @@ impl CrossRefIndex {
 
             let mut sub_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-            // Búsqueda por libro (nombre o ID)
-            let book_parser =
-                QueryParser::for_index(&self.index, vec![book_name_f, book_id_field]);
-            if let Ok(book_query) = book_parser.parse_query(book_query_str) {
-                sub_queries.push((Occur::Must, book_query));
-            }
+            // Búsqueda por libro con tolerancia a errores
+            let book_query = self.build_book_name_query(book_query_str, book_name_f, book_id_field);
+            sub_queries.push((Occur::Must, book_query));
 
-            // Búsqueda por capítulo
+            // Capítulo exacto
             let chapter_term = Term::from_field_i64(chapter_f, chapter_num);
             sub_queries.push((
                 Occur::Must,
                 Box::new(TermQuery::new(chapter_term, Default::default())),
             ));
 
-            // Búsqueda por verso(s)
+            // Verso(s)
             match (verse_start, verse_end) {
                 (Some(start), Some(end)) => {
                     let range_query = RangeQuery::new(
@@ -225,17 +292,74 @@ impl CrossRefIndex {
 
             Box::new(BooleanQuery::new(sub_queries))
         } else {
-            // Búsqueda libre por nombre de libro en ambos campos
+            // Búsqueda libre por nombre de libro con fuzzy
             let source_book_name = self.schema.get_field("source_book_name").unwrap();
             let target_book_name = self.schema.get_field("target_book_name").unwrap();
             let source_book_id = self.schema.get_field("source_book").unwrap();
             let target_book_id = self.schema.get_field("target_book").unwrap();
 
-            let parser = QueryParser::for_index(
-                &self.index,
-                vec![source_book_name, target_book_name, source_book_id, target_book_id],
-            );
-            parser.parse_query(query)?
+            let normalized = normalize_query(query);
+            let mut sub_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+            for token in normalized.split_whitespace() {
+                if token.is_empty() {
+                    continue;
+                }
+
+                let distance = fuzzy_distance_for_term(token).max(1);
+
+                // Source book name
+                let term_sn = Term::from_field_text(source_book_name, token);
+                let exact_sn = TermQuery::new(term_sn.clone(), IndexRecordOption::WithFreqs);
+                sub_queries.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(exact_sn), 5.0)),
+                ));
+                let fuzzy_sn = FuzzyTermQuery::new_prefix(term_sn, distance, true);
+                sub_queries.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(fuzzy_sn), 1.0)),
+                ));
+
+                // Target book name
+                let term_tn = Term::from_field_text(target_book_name, token);
+                let exact_tn = TermQuery::new(term_tn.clone(), IndexRecordOption::WithFreqs);
+                sub_queries.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(exact_tn), 5.0)),
+                ));
+                let fuzzy_tn = FuzzyTermQuery::new_prefix(term_tn, distance, true);
+                sub_queries.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(fuzzy_tn), 1.0)),
+                ));
+
+                // Source book ID exacto
+                let term_si = Term::from_field_text(source_book_id, token);
+                let exact_si = TermQuery::new(term_si, IndexRecordOption::Basic);
+                sub_queries.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(exact_si), 10.0)),
+                ));
+
+                // Target book ID exacto
+                let term_ti = Term::from_field_text(target_book_id, token);
+                let exact_ti = TermQuery::new(term_ti, IndexRecordOption::Basic);
+                sub_queries.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(exact_ti), 10.0)),
+                ));
+            }
+
+            if sub_queries.is_empty() {
+                let parser = QueryParser::for_index(
+                    &self.index,
+                    vec![source_book_name, target_book_name, source_book_id, target_book_id],
+                );
+                parser.parse_query(&normalized)?
+            } else {
+                Box::new(BooleanQuery::new(sub_queries))
+            }
         };
 
         let top_docs = searcher.search(&final_query, &TopDocs::with_limit(limit))?;

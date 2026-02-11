@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::ops::Bound;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
+use tantivy::query::{
+    BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, QueryParser, RangeQuery, TermQuery,
+};
 use tantivy::tokenizer::{
     AsciiFoldingFilter, LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer,
 };
@@ -25,6 +27,26 @@ pub struct VerseIndex {
     is_new: bool,
     reader: IndexReader,
     schema: Schema,
+}
+
+/// Calcula la distancia Levenshtein apropiada según la longitud del término.
+/// - Palabras cortas (1-3 chars): distancia 0 (exacta, evitar ruido)
+/// - Palabras medianas (4-6 chars): distancia 1
+/// - Palabras largas (7+ chars): distancia 2
+fn fuzzy_distance_for_term(term: &str) -> u8 {
+    let len = term.chars().count();
+    if len <= 3 {
+        0
+    } else if len <= 6 {
+        1
+    } else {
+        2
+    }
+}
+
+/// Normaliza texto para búsqueda: minúsculas + ascii folding
+fn normalize_query(query: &str) -> String {
+    deunicode::deunicode(&query.to_lowercase())
 }
 
 impl VerseIndex {
@@ -116,6 +138,98 @@ impl VerseIndex {
         Ok(())
     }
 
+    /// Construye queries fuzzy por cada token del input.
+    /// Combina una query exacta (boost alto) con una fuzzy (boost bajo)
+    /// para que las coincidencias exactas aparezcan primero y las fuzzy
+    /// solo complementen sin introducir ruido.
+    fn build_fuzzy_text_query(
+        &self,
+        query_str: &str,
+        field: Field,
+    ) -> Vec<(Occur, Box<dyn Query>)> {
+        let normalized = normalize_query(query_str);
+        let tokens: Vec<&str> = normalized.split_whitespace().collect();
+        let mut sub_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+        for token in &tokens {
+            if token.is_empty() {
+                continue;
+            }
+
+            let distance = fuzzy_distance_for_term(token);
+            let term = Term::from_field_text(field, token);
+
+            // Query exacta con boost alto - prioriza coincidencias exactas
+            let exact_query = TermQuery::new(term.clone(), IndexRecordOption::WithFreqs);
+            let boosted_exact = BoostQuery::new(Box::new(exact_query), 5.0);
+            sub_queries.push((Occur::Should, Box::new(boosted_exact)));
+
+            // Query fuzzy (solo si la distancia > 0, evitando ruido en palabras cortas)
+            if distance > 0 {
+                let fuzzy_query = FuzzyTermQuery::new_prefix(term, distance, true);
+                let boosted_fuzzy = BoostQuery::new(Box::new(fuzzy_query), 1.0);
+                sub_queries.push((Occur::Should, Box::new(boosted_fuzzy)));
+            }
+        }
+
+        sub_queries
+    }
+
+    /// Construye una query para nombres de libros con tolerancia a errores.
+    /// Los nombres de libros pueden escribirse de muchas formas
+    /// (Génesis, Genesis, Gen, GEN) así que se usa fuzzy más permisivo.
+    fn build_book_name_query(
+        &self,
+        book_str: &str,
+        book_name_field: Field,
+        book_id_field: Field,
+    ) -> Box<dyn Query> {
+        let normalized = normalize_query(book_str);
+        let mut sub_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+        // Buscar por book_id exacto (ej: "GEN", "MAT")
+        let id_term = Term::from_field_text(book_id_field, &normalized);
+        let id_exact = TermQuery::new(id_term, IndexRecordOption::Basic);
+        sub_queries.push((
+            Occur::Should,
+            Box::new(BoostQuery::new(Box::new(id_exact), 10.0)),
+        ));
+
+        // Buscar por book_id uppercase
+        let id_upper = Term::from_field_text(book_id_field, &normalized.to_uppercase());
+        let id_exact_upper = TermQuery::new(id_upper, IndexRecordOption::Basic);
+        sub_queries.push((
+            Occur::Should,
+            Box::new(BoostQuery::new(Box::new(id_exact_upper), 10.0)),
+        ));
+
+        // Cada token del nombre del libro
+        for token in normalized.split_whitespace() {
+            if token.is_empty() {
+                continue;
+            }
+
+            let term = Term::from_field_text(book_name_field, token);
+
+            // Exacta con boost alto
+            let exact = TermQuery::new(term.clone(), IndexRecordOption::WithFreqs);
+            sub_queries.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(exact), 8.0)),
+            ));
+
+            // Fuzzy para tolerar errores en nombres de libros (mínimo distancia 1)
+            let distance = fuzzy_distance_for_term(token).max(1);
+            let fuzzy = FuzzyTermQuery::new_prefix(term, distance, true);
+            sub_queries.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(fuzzy), 2.0)),
+            ));
+        }
+
+        Box::new(BooleanQuery::new(sub_queries))
+    }
+
     pub fn search(
         &self,
         query: &str,
@@ -124,27 +238,20 @@ impl VerseIndex {
     ) -> tantivy::Result<Vec<IndexedVerse>> {
         let searcher = self.reader.searcher();
 
-        // Obtener todos los campos para búsqueda
         let text_field = self.schema.get_field("text").unwrap();
-        let bible_name_field = self.schema.get_field("bible_name").unwrap();
         let book_name_field = self.schema.get_field("book_name").unwrap();
         let book_id_field = self.schema.get_field("book_id").unwrap();
         let chapter_field = self.schema.get_field("chapter").unwrap();
         let verse_field = self.schema.get_field("verse").unwrap();
 
-        // Regex mejorado para capturar rangos de versos
-        // Ejemplos que captura:
-        // - "Genesis 1" → libro + capítulo
-        // - "Genesis 1:20" → libro + capítulo + verso
-        // - "Genesis 1:20-25" → libro + capítulo + rango de versos
-        // - "Juan 3:16-18" → libro + capítulo + rango de versos
+        // Regex para capturar referencias bíblicas
         let reference_pattern = regex::Regex::new(
             r"(?i)^\s*(?P<book>.+?)\s+(?P<chapter>\d+)(?::(?P<verse_start>\d+)(?:-(?P<verse_end>\d+))?)?\s*$"
         ).unwrap();
 
         let final_query: Box<dyn Query> = if let Some(caps) = reference_pattern.captures(query) {
             // ============================================
-            // BÚSQUEDA ESTRUCTURADA (con referencia bíblica)
+            // BÚSQUEDA ESTRUCTURADA (referencia bíblica)
             // ============================================
             let book_query_str = caps.name("book").unwrap().as_str().trim();
             let chapter_num = caps
@@ -162,42 +269,20 @@ impl VerseIndex {
 
             let mut sub_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-            // 1. Búsqueda en nombre del libro (fuzzy o exacta)
-            if fuzzy {
-                let book_parser =
-                    QueryParser::for_index(&self.index, vec![book_name_field, book_id_field]);
-                if let Ok(book_query) = book_parser.parse_query(book_query_str) {
-                    sub_queries.push((Occur::Must, book_query));
-                }
-            } else {
-                // Búsqueda exacta: debe coincidir con nombre O id del libro
-                let mut book_sub: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            // 1. Nombre del libro con tolerancia a errores
+            let book_query =
+                self.build_book_name_query(book_query_str, book_name_field, book_id_field);
+            sub_queries.push((Occur::Must, book_query));
 
-                let book_name_term = Term::from_field_text(book_name_field, book_query_str);
-                book_sub.push((
-                    Occur::Should,
-                    Box::new(TermQuery::new(book_name_term, Default::default())),
-                ));
-
-                let book_id_term = Term::from_field_text(book_id_field, book_query_str);
-                book_sub.push((
-                    Occur::Should,
-                    Box::new(TermQuery::new(book_id_term, Default::default())),
-                ));
-
-                sub_queries.push((Occur::Must, Box::new(BooleanQuery::new(book_sub))));
-            }
-
-            // 2. Búsqueda por capítulo (exacta, siempre requerida)
+            // 2. Capítulo exacto
             let chapter_term = Term::from_field_i64(chapter_field, chapter_num);
             sub_queries.push((
                 Occur::Must,
                 Box::new(TermQuery::new(chapter_term, Default::default())),
             ));
 
-            // 3. Búsqueda por verso(s)
+            // 3. Verso(s)
             match (verse_start, verse_end) {
-                // Caso 1: Rango de versos (ej: "Genesis 1:20-25")
                 (Some(start), Some(end)) => {
                     let range_query = RangeQuery::new(
                         Bound::Included(Term::from_field_i64(verse_field, start)),
@@ -205,7 +290,6 @@ impl VerseIndex {
                     );
                     sub_queries.push((Occur::Must, Box::new(range_query)));
                 }
-                // Caso 2: Verso único (ej: "Genesis 1:20")
                 (Some(start), None) => {
                     let verse_term = Term::from_field_i64(verse_field, start);
                     sub_queries.push((
@@ -213,11 +297,7 @@ impl VerseIndex {
                         Box::new(TermQuery::new(verse_term, Default::default())),
                     ));
                 }
-                // Caso 3: Solo capítulo (ej: "Genesis 1") - todos los versos del capítulo
-                (None, None) => {
-                    // No agregamos filtro de verso, devolverá todos los versos del capítulo
-                }
-                // Caso 4: Inválido (verso_end sin verso_start) - ignorar
+                (None, None) => {}
                 (None, Some(_)) => {}
             }
 
@@ -226,44 +306,22 @@ impl VerseIndex {
             // ============================================
             // BÚSQUEDA DE CONTENIDO (texto libre)
             // ============================================
-            let mut sub_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-
             if fuzzy {
-                // Buscar en texto de versos con fuzzy
-                let text_parser = QueryParser::for_index(&self.index, vec![text_field]);
-                if let Ok(text_query) = text_parser.parse_query(query) {
-                    sub_queries.push((Occur::Should, text_query));
-                }
+                // Búsqueda con FuzzyTermQuery real por cada token
+                let text_queries = self.build_fuzzy_text_query(query, text_field);
 
-                // Buscar en nombres de biblia con fuzzy
-                let bible_parser = QueryParser::for_index(&self.index, vec![bible_name_field]);
-                if let Ok(bible_query) = bible_parser.parse_query(query) {
-                    sub_queries.push((Occur::Should, bible_query));
-                }
-
-                // Buscar en nombres de libro con fuzzy
-                let book_parser =
-                    QueryParser::for_index(&self.index, vec![book_name_field, book_id_field]);
-                if let Ok(book_query) = book_parser.parse_query(query) {
-                    sub_queries.push((Occur::Should, book_query));
+                if text_queries.is_empty() {
+                    // Fallback: QueryParser con fuzzy por campo
+                    let mut parser = QueryParser::for_index(&self.index, vec![text_field]);
+                    parser.set_field_fuzzy(text_field, true, 1, true);
+                    parser.parse_query(&normalize_query(query))?
+                } else {
+                    Box::new(BooleanQuery::new(text_queries))
                 }
             } else {
-                // Búsqueda exacta en todos los campos de texto
-                let parser = QueryParser::for_index(
-                    &self.index,
-                    vec![text_field, bible_name_field, book_name_field, book_id_field],
-                );
-                if let Ok(parsed) = parser.parse_query(query) {
-                    sub_queries.push((Occur::Should, parsed));
-                }
-            }
-
-            if sub_queries.is_empty() {
-                // Fallback: búsqueda simple en texto
+                // Búsqueda exacta con QueryParser estándar
                 let parser = QueryParser::for_index(&self.index, vec![text_field]);
-                parser.parse_query(query)?
-            } else {
-                Box::new(BooleanQuery::new(sub_queries))
+                parser.parse_query(&normalize_query(query))?
             }
         };
 
