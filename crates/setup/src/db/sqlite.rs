@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use service_db::{
-    Connection, Crud, DbBible, DbBook, DbCrossReference, DbHeader, DbLanguage, DbVerse,
-    DbVerseNote, IndexedCrossReference, IndexedVerse, Sqlite, SynonymMap,
+    ChapterHeader, ChapterSearchResult, ChapterVerse, Connection, CrossReferenceVerse, Crud,
+    DbBible, DbBook, DbCrossReference, DbHeader, DbLanguage, DbVerse, DbVerseNote,
+    IndexedCrossReference, IndexedVerse, Sqlite, SynonymMap,
 };
 
 use crate::{BibleInstallStatus, CrossReference, Reference, Result};
@@ -347,5 +349,195 @@ impl DbSink for SqliteDbSink {
     fn finalize(&self) -> Result<()> {
         // any final steps like rebuilding indices
         Ok(())
+    }
+
+    fn search_full_chapter(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<ChapterSearchResult>> {
+        let verse_index = self.db.verse_index();
+        let idx = verse_index
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| crate::Error::Other("Verse index not available".into()))?;
+
+        // 1. Buscar versículos que coinciden con la query via Tantivy
+        let search_results = idx
+            .search(query, limit.unwrap_or(50), true)
+            .map_err(service_db::Error::from)?;
+
+        if search_results.is_empty() {
+            return Err(service_db::Error::NoSearchResult.into());
+        }
+
+        // Agrupar resultados por (bible_id, bible_name, book_id, book_name, chapter)
+        let mut groups: HashMap<(String, String, String, String, i32), Vec<i32>> = HashMap::new();
+        for r in &search_results {
+            groups
+                .entry((
+                    r.bible_id.clone(),
+                    r.bible_name.clone(),
+                    r.book_id.clone(),
+                    r.book_name.clone(),
+                    r.chapter,
+                ))
+                .or_default()
+                .push(r.verse);
+        }
+
+        let conn = self.conn.clone();
+        let mut results = Vec::new();
+
+        for ((bible_id, bible_name, book_id, book_name, chapter), highlighted_verses) in groups {
+            // 2. Obtener todos los versículos del capítulo desde SQLite
+            let chapter_verses = {
+                let guard = conn.lock().unwrap();
+                let mut stmt = guard
+                    .prepare(
+                        "SELECT verse_number, text FROM verses \
+                         WHERE book_id = ?1 AND chapter_number = ?2 \
+                         ORDER BY verse_number ASC",
+                    )
+                    .map_err(service_db::Error::from)?;
+
+                let rows = stmt
+                    .query_map([&book_id as &dyn service_db::rusqlite::ToSql, &chapter], |row| {
+                        Ok((
+                            row.get::<_, i32>("verse_number")?,
+                            row.get::<_, String>("text")?,
+                        ))
+                    })
+                    .map_err(service_db::Error::from)?;
+
+                rows.collect::<service_db::SqliteResult<Vec<(i32, String)>>>()
+                    .map_err(service_db::Error::from)?
+            };
+
+            // 3. Obtener encabezados del capítulo desde SQLite
+            let headers = {
+                let guard = conn.lock().unwrap();
+                let mut stmt = guard
+                    .prepare(
+                        "SELECT text FROM headers \
+                         WHERE book_id = ?1 AND chapter_number = ?2",
+                    )
+                    .map_err(service_db::Error::from)?;
+
+                let rows = stmt
+                    .query_map([&book_id as &dyn service_db::rusqlite::ToSql, &chapter], |row| {
+                        Ok(ChapterHeader {
+                            text: row.get::<_, String>("text")?,
+                        })
+                    })
+                    .map_err(service_db::Error::from)?;
+
+                rows.collect::<service_db::SqliteResult<Vec<ChapterHeader>>>()
+                    .map_err(service_db::Error::from)?
+            };
+
+            // 4. Obtener cross-references del capítulo desde SQLite
+            let cross_refs = {
+                let guard = conn.lock().unwrap();
+                let mut stmt = guard
+                    .prepare(
+                        "SELECT source_verse, target_book, target_chapter, target_verse \
+                         FROM cross_references \
+                         WHERE source_book = ?1 AND source_chapter = ?2 \
+                         ORDER BY source_verse ASC",
+                    )
+                    .map_err(service_db::Error::from)?;
+
+                let rows = stmt
+                    .query_map([&book_id as &dyn service_db::rusqlite::ToSql, &chapter], |row| {
+                        Ok((
+                            row.get::<_, i32>("source_verse")?,
+                            row.get::<_, String>("target_book")?,
+                            row.get::<_, i32>("target_chapter")?,
+                            row.get::<_, i32>("target_verse")?,
+                        ))
+                    })
+                    .map_err(service_db::Error::from)?;
+
+                rows.collect::<service_db::SqliteResult<Vec<(i32, String, i32, i32)>>>()
+                    .map_err(service_db::Error::from)?
+            };
+
+            // Agrupar refs por versículo source
+            let mut refs_by_verse: HashMap<i32, Vec<(String, i32, i32)>> = HashMap::new();
+            for (source_verse, target_book, target_chapter, target_verse) in cross_refs {
+                refs_by_verse
+                    .entry(source_verse)
+                    .or_default()
+                    .push((target_book, target_chapter, target_verse));
+            }
+
+            // 5. Resolver texto de cada versículo destino
+            let mut cross_refs_by_verse: HashMap<i32, Vec<CrossReferenceVerse>> = HashMap::new();
+            for (verse_num, targets) in refs_by_verse {
+                let mut resolved = Vec::new();
+                for (target_book, target_chapter, target_verse) in targets {
+                    let guard = conn.lock().unwrap();
+
+                    let verse_text = guard
+                        .query_row(
+                            "SELECT text FROM verses \
+                             WHERE book_id = ?1 AND chapter_number = ?2 AND verse_number = ?3 \
+                             LIMIT 1",
+                            [
+                                &target_book as &dyn service_db::rusqlite::ToSql,
+                                &target_chapter,
+                                &target_verse,
+                            ],
+                            |row| row.get::<_, String>("text"),
+                        )
+                        .ok()
+                        .unwrap_or_default();
+
+                    let target_book_name = guard
+                        .query_row(
+                            "SELECT name_normal FROM books WHERE id = ?1 LIMIT 1",
+                            [&target_book],
+                            |row| row.get::<_, String>("name_normal"),
+                        )
+                        .unwrap_or_else(|_| target_book.clone());
+
+                    resolved.push(CrossReferenceVerse {
+                        book_id: target_book,
+                        book_name: target_book_name,
+                        chapter: target_chapter,
+                        verse: target_verse,
+                        text: verse_text,
+                    });
+                }
+                cross_refs_by_verse.insert(verse_num, resolved);
+            }
+
+            // 6. Construir resultado
+            let verses: Vec<ChapterVerse> = chapter_verses
+                .into_iter()
+                .map(|(verse_num, text)| ChapterVerse {
+                    verse_number: verse_num,
+                    text,
+                    highlighted: highlighted_verses.contains(&verse_num),
+                    cross_references: cross_refs_by_verse
+                        .remove(&verse_num)
+                        .unwrap_or_default(),
+                })
+                .collect();
+
+            results.push(ChapterSearchResult {
+                bible_id,
+                bible_name,
+                book_id,
+                book_name,
+                chapter,
+                headers,
+                verses,
+            });
+        }
+
+        results.sort_by_key(|r| r.chapter);
+        Ok(results)
     }
 }

@@ -25,7 +25,7 @@ pub use notes::*;
 pub use synonym::*;
 pub use verse::*;
 
-pub use rusqlite::{Error as SqliteError, Result as SqliteResult};
+pub use rusqlite::{self, Error as SqliteError, Result as SqliteResult};
 
 pub type Connection = Arc<Mutex<SQLiteConnection>>;
 

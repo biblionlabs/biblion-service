@@ -4,7 +4,7 @@ use crate::{BibleInstallStatus, models};
 mod sqlite;
 mod tantivy;
 
-use service_db::{IndexedCrossReference, IndexedVerse, SynonymMap};
+use service_db::{ChapterSearchResult, IndexedCrossReference, IndexedVerse, SynonymMap};
 pub use sqlite::*;
 pub use tantivy::*;
 
@@ -124,5 +124,18 @@ pub trait DbSink: Send + Sync {
 
     fn finalize(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Busca una referencia bíblica y devuelve el capítulo completo con:
+    /// - Todos los versículos del capítulo
+    /// - Los versículos que coinciden con la búsqueda marcados como `highlighted`
+    /// - Las referencias cruzadas resueltas (con texto del versículo destino)
+    /// - Los encabezados del capítulo
+    fn search_full_chapter(
+        &self,
+        _query: &str,
+        _limit: Option<usize>,
+    ) -> Result<Vec<ChapterSearchResult>> {
+        Ok(vec![])
     }
 }
