@@ -5,6 +5,7 @@ use rusqlite::{Connection as SQLiteConnection, Params, Row, ToSql, params_from_i
 
 mod bible;
 mod book;
+mod chapter_search;
 mod cross;
 mod error;
 mod header;
@@ -15,6 +16,7 @@ mod verse;
 
 pub use bible::*;
 pub use book::*;
+pub use chapter_search::*;
 pub use cross::*;
 pub use error::{DB as Error, Result};
 pub use header::*;
