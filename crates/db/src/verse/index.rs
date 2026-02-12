@@ -1,3 +1,4 @@
+use crate::synonym::{SynonymMap, SynonymTokenFilter};
 use serde::{Deserialize, Serialize};
 use std::ops::Bound;
 use std::path::Path;
@@ -8,7 +9,6 @@ use tantivy::query::{
 use tantivy::tokenizer::{
     AsciiFoldingFilter, LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer,
 };
-use crate::synonym::{SynonymMap, SynonymTokenFilter};
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument};
 use tantivy::{IndexWriter, schema::*};
 

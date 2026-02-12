@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use service_db::{
-    ChapterSearchResult, ChapterVerse, CrossRefIndex, CrossReferenceVerse,
-    IndexedCrossReference, IndexedVerse, SearchDirection, SynonymMap, VerseIndex,
+    ChapterSearchResult, ChapterVerse, CrossRefIndex, CrossReferenceVerse, IndexedCrossReference,
+    IndexedVerse, SearchDirection, SynonymMap, VerseIndex,
 };
 
 use crate::{BibleInstallStatus, Result};
@@ -20,7 +20,8 @@ impl From<String> for TantivySink {
     fn from(db_path: String) -> Self {
         let base_path = PathBuf::from(&db_path);
         let index = Arc::new(VerseIndex::new(&base_path).ok());
-        let cross_path = base_path.parent()
+        let cross_path = base_path
+            .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("cross_index");
         let cross_index = Arc::new(CrossRefIndex::new(cross_path).ok());
@@ -31,7 +32,8 @@ impl From<String> for TantivySink {
 impl From<PathBuf> for TantivySink {
     fn from(index_path: PathBuf) -> Self {
         let index = Arc::new(VerseIndex::new(&index_path).ok());
-        let cross_path = index_path.parent()
+        let cross_path = index_path
+            .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("cross_index");
         let cross_index = Arc::new(CrossRefIndex::new(cross_path).ok());
@@ -83,9 +85,7 @@ impl DbSink for TantivySink {
                     })
                 }
             }
-            Err(_) => {
-                Ok(BibleInstallStatus::NotInstalled)
-            }
+            Err(_) => Ok(BibleInstallStatus::NotInstalled),
         }
     }
 
@@ -214,10 +214,8 @@ impl DbSink for TantivySink {
             for (verse_num, targets) in refs_by_verse {
                 let mut resolved = Vec::new();
                 for (target_book, target_book_name, target_chapter, target_verse) in targets {
-                    let target_query = format!(
-                        "{} {}:{}",
-                        target_book_name, target_chapter, target_verse
-                    );
+                    let target_query =
+                        format!("{} {}:{}", target_book_name, target_chapter, target_verse);
                     let verse_text = idx
                         .search(&target_query, 1, false)
                         .ok()
@@ -243,9 +241,7 @@ impl DbSink for TantivySink {
                     verse_number: verse_num,
                     text,
                     highlighted: highlighted_verses.contains(&verse_num),
-                    cross_references: cross_refs_by_verse
-                        .remove(&verse_num)
-                        .unwrap_or_default(),
+                    cross_references: cross_refs_by_verse.remove(&verse_num).unwrap_or_default(),
                 })
                 .collect();
 

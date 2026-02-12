@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Texto completo de un versículo referenciado por una referencia cruzada.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct CrossReferenceVerse {
     pub book_id: String,
     pub book_name: String,
@@ -11,7 +11,7 @@ pub struct CrossReferenceVerse {
 }
 
 /// Versículo dentro del capítulo con indicador de resaltado y sus referencias cruzadas resueltas.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct ChapterVerse {
     pub verse_number: i32,
     pub text: String,
@@ -22,7 +22,7 @@ pub struct ChapterVerse {
 }
 
 /// Encabezado de sección dentro del capítulo.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct ChapterHeader {
     pub text: String,
 }
@@ -32,7 +32,7 @@ pub struct ChapterHeader {
 /// Contiene todos los versículos del capítulo, con los versículos buscados
 /// marcados como `highlighted`, los encabezados del capítulo, y las
 /// referencias cruzadas resueltas (con texto) para cada versículo.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct ChapterSearchResult {
     pub bible_id: String,
     pub bible_name: String,

@@ -240,10 +240,8 @@ impl CrossRefIndex {
                     "target_verse",
                 ),
                 SearchDirection::Both => {
-                    let source_results =
-                        self.search(query, limit, SearchDirection::FromSource)?;
-                    let target_results =
-                        self.search(query, limit, SearchDirection::FromTarget)?;
+                    let source_results = self.search(query, limit, SearchDirection::FromSource)?;
+                    let target_results = self.search(query, limit, SearchDirection::FromTarget)?;
 
                     let mut combined = source_results;
                     combined.extend(target_results);
@@ -354,7 +352,12 @@ impl CrossRefIndex {
             if sub_queries.is_empty() {
                 let parser = QueryParser::for_index(
                     &self.index,
-                    vec![source_book_name, target_book_name, source_book_id, target_book_id],
+                    vec![
+                        source_book_name,
+                        target_book_name,
+                        source_book_id,
+                        target_book_id,
+                    ],
                 );
                 parser.parse_query(&normalized)?
             } else {

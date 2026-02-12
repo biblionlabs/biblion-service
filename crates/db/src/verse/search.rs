@@ -32,6 +32,7 @@ impl SearchedVerse {
         if let Some(idx) = index.as_ref() {
             if let Ok(results) = idx
                 .search(search, limit.unwrap_or(50), true)
+                .inspect_err(|e| println!("Search Fail: {e}"))
             {
                 return Ok(results
                     .into_iter()

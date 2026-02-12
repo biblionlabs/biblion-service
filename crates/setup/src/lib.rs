@@ -1210,9 +1210,7 @@ impl Setup {
                     Ok(resp) if resp.status().is_success() => {
                         let text = resp.text()?;
                         std::fs::write(&syn_path, text.as_bytes())?;
-                        self.emit::<event::Message>(format!(
-                            "Cached synonyms for {lang}"
-                        ));
+                        self.emit::<event::Message>(format!("Cached synonyms for {lang}"));
                     }
                     _ => {
                         self.emit::<event::Message>(format!(

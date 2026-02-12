@@ -402,12 +402,15 @@ impl DbSink for SqliteDbSink {
                     .map_err(service_db::Error::from)?;
 
                 let rows = stmt
-                    .query_map([&book_id as &dyn service_db::rusqlite::ToSql, &chapter], |row| {
-                        Ok((
-                            row.get::<_, i32>("verse_number")?,
-                            row.get::<_, String>("text")?,
-                        ))
-                    })
+                    .query_map(
+                        [&book_id as &dyn service_db::rusqlite::ToSql, &chapter],
+                        |row| {
+                            Ok((
+                                row.get::<_, i32>("verse_number")?,
+                                row.get::<_, String>("text")?,
+                            ))
+                        },
+                    )
                     .map_err(service_db::Error::from)?;
 
                 rows.collect::<service_db::SqliteResult<Vec<(i32, String)>>>()
@@ -425,11 +428,14 @@ impl DbSink for SqliteDbSink {
                     .map_err(service_db::Error::from)?;
 
                 let rows = stmt
-                    .query_map([&book_id as &dyn service_db::rusqlite::ToSql, &chapter], |row| {
-                        Ok(ChapterHeader {
-                            text: row.get::<_, String>("text")?,
-                        })
-                    })
+                    .query_map(
+                        [&book_id as &dyn service_db::rusqlite::ToSql, &chapter],
+                        |row| {
+                            Ok(ChapterHeader {
+                                text: row.get::<_, String>("text")?,
+                            })
+                        },
+                    )
                     .map_err(service_db::Error::from)?;
 
                 rows.collect::<service_db::SqliteResult<Vec<ChapterHeader>>>()
@@ -449,14 +455,17 @@ impl DbSink for SqliteDbSink {
                     .map_err(service_db::Error::from)?;
 
                 let rows = stmt
-                    .query_map([&book_id as &dyn service_db::rusqlite::ToSql, &chapter], |row| {
-                        Ok((
-                            row.get::<_, i32>("source_verse")?,
-                            row.get::<_, String>("target_book")?,
-                            row.get::<_, i32>("target_chapter")?,
-                            row.get::<_, i32>("target_verse")?,
-                        ))
-                    })
+                    .query_map(
+                        [&book_id as &dyn service_db::rusqlite::ToSql, &chapter],
+                        |row| {
+                            Ok((
+                                row.get::<_, i32>("source_verse")?,
+                                row.get::<_, String>("target_book")?,
+                                row.get::<_, i32>("target_chapter")?,
+                                row.get::<_, i32>("target_verse")?,
+                            ))
+                        },
+                    )
                     .map_err(service_db::Error::from)?;
 
                 rows.collect::<service_db::SqliteResult<Vec<(i32, String, i32, i32)>>>()
@@ -466,10 +475,11 @@ impl DbSink for SqliteDbSink {
             // Agrupar refs por versículo source
             let mut refs_by_verse: HashMap<i32, Vec<(String, i32, i32)>> = HashMap::new();
             for (source_verse, target_book, target_chapter, target_verse) in cross_refs {
-                refs_by_verse
-                    .entry(source_verse)
-                    .or_default()
-                    .push((target_book, target_chapter, target_verse));
+                refs_by_verse.entry(source_verse).or_default().push((
+                    target_book,
+                    target_chapter,
+                    target_verse,
+                ));
             }
 
             // 5. Resolver texto de cada versículo destino
@@ -520,9 +530,7 @@ impl DbSink for SqliteDbSink {
                     verse_number: verse_num,
                     text,
                     highlighted: highlighted_verses.contains(&verse_num),
-                    cross_references: cross_refs_by_verse
-                        .remove(&verse_num)
-                        .unwrap_or_default(),
+                    cross_references: cross_refs_by_verse.remove(&verse_num).unwrap_or_default(),
                 })
                 .collect();
 
