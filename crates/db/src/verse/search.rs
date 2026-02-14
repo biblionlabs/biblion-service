@@ -17,6 +17,7 @@ pub struct SearchedBible {
 pub struct SearchedVerse {
     pub bible: SearchedBible,
     pub book: String,
+    pub book_id: String,
     pub chapter: i32,
     pub part: i32,
     pub verse: (i32, i32),
@@ -24,14 +25,10 @@ pub struct SearchedVerse {
 }
 
 impl SearchedVerse {
-    pub fn from_search(
-        search: &str,
-        index: Arc<Option<VerseIndex>>,
-        limit: Option<usize>,
-    ) -> Result<Vec<Self>> {
+    pub fn from_search(search: &str, index: Arc<Option<VerseIndex>>, limit: Option<usize>) -> Result<Vec<Self>> {
         if let Some(idx) = index.as_ref() {
             if let Ok(results) = idx
-                .search(search, limit.unwrap_or(50), true)
+                .search(search, limit, true)
                 .inspect_err(|e| println!("Search Fail: {e}"))
             {
                 return Ok(results
@@ -43,6 +40,7 @@ impl SearchedVerse {
                             english_name: "".to_string(),
                         },
                         book: r.book_name,
+                        book_id: r.book_id,
                         chapter: r.chapter,
                         part: 0,
                         verse: (r.verse, 1),

@@ -131,11 +131,13 @@ pub trait DbSink: Send + Sync {
     /// - Los versículos que coinciden con la búsqueda marcados como `highlighted`
     /// - Las referencias cruzadas resueltas (con texto del versículo destino)
     /// - Los encabezados del capítulo
-    fn search_full_chapter(
+    fn get_crossreferences(
         &self,
-        _query: &str,
-        _limit: Option<usize>,
-    ) -> Result<Vec<ChapterSearchResult>> {
-        Ok(vec![])
+        _bible_id: &str,
+        _book_id: &str,
+        _chapter_idx: i32,
+        _verse_idx: i32,
+    ) -> Result<Option<ChapterSearchResult>> {
+        Ok(None)
     }
 }

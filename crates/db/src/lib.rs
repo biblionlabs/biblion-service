@@ -11,6 +11,7 @@ mod error;
 mod header;
 mod lang;
 mod notes;
+pub mod search_utils;
 mod synonym;
 mod verse;
 
